@@ -1,0 +1,11 @@
+node_modules/
+web/dist/
+ros_ws/build/
+ros_ws/install/
+ros_ws/log/
+__pycache__/
+.pytest_cache/
+robot/booth.env
+
+# 구매한 아바타 모델. 저장소·외부로 나가면 안 된다
+web/public/avatar/

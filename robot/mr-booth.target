@@ -1,0 +1,8 @@
+# 부스 시연 스택 전체. enable해 두면 전원을 넣을 때 다 뜬다. follow는 꺼진 채라 출발 전에는 움직이지 않는다.
+#   sudo systemctl start|stop|restart mr-booth.target
+[Unit]
+Description=부스 시연 스택
+Wants=mr-booth@follow.service mr-booth@phone_bridge.service mr-booth@mission.service mr-booth@telemetry.service mr-booth@pad.service
+
+[Install]
+WantedBy=multi-user.target

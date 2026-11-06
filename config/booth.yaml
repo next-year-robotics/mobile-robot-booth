@@ -1,0 +1,126 @@
+# 부스 시연 대시보드 설정.
+#
+# 물리 상수의 정본은 mobile-robot 쪽이다. 여기 값은 그 사본이고, 출처를 옆에 적어 둔다.
+# 로봇 쪽 값이 바뀌면 같이 고친다.
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  state_rate_hz: 30
+
+ros:
+  # Pi 펌웨어가 도메인 0으로 컴파일돼 있다(base_contract.md "ROS_DOMAIN_ID"). run.sh가 export한다.
+  domain_id: 0
+  topics:
+    joint_states: /joint_states
+    base_status: /base/status
+    imu: /imu/data_raw            # MCU 원본. /imu/data는 공분산만 채운 사본이다
+    odom: /odom
+    marker_track: /marker_track
+    detections: /aruco_detections
+    image: /camera/image_raw/compressed
+    camera_info: /camera/camera_info
+    cmd_vel: /cmd_vel
+    cmd_inputs:                   # twist_mux 입력. 어느 쪽이 지금 모는지 보여 준다
+      teleop: /cmd_vel_teleop
+      align: /cmd_vel_align
+      follow: /cmd_vel_follow
+    phone_link: /phone/link_status
+    app_status: /robot/app_status
+    joy: /joy                     # 패드가 붙어 있는지만 본다
+    trip_command: /phone/trip_command   # 운영 버튼 출발·멈춤이 여기로 낸다(앱 브리지와 같은 토픽)
+
+robot:
+  # mr_base/config 유효값. 바퀴 회전각 → 지면 속도 변환에 쓴다.
+  wheel_radius_m: 0.04979
+  # MCU base_config.h 값. /cmd_vel → 바퀴 목표 속도(역기구학)에 쓴다.
+  mcu_wheel_radius_m: 0.050
+  mcu_wheel_separation_m: 0.30912
+  # 명령이 이보다 오래되면 목표 속도를 0으로 본다. MCU 워치독 200 ms보다 조금 길게.
+  cmd_fresh_s: 0.25
+
+camera:
+  # compressed_image_transport 기본 JPEG 품질은 95라 720p30이 50 Mbps를 넘는다. 부스 Wi-Fi에는 무리라
+  # 브리지가 Pi의 usb_cam 노드 파라미터(이름 끝이 jpeg_quality인 것)를 이 값으로 낮춘다. null이면 건드리지 않는다.
+  # 압축 영상을 쓰는 것은 이 대시보드뿐이라 로봇 동작에는 영향이 없다.
+  node: /camera/usb_cam
+  jpeg_quality: 60
+  # mr_description/config/robot_params.yaml: base_link z 0.050 + camera z 0.360.
+  # marker_track.yaml camera_origin_xyz_m와 같다.
+  optical_origin_m: [0.250, 0.000, 0.410]
+  # /camera/camera_info를 받으면 그쪽을 쓴다. 이 값은 c920_calibration.yaml 사본(받기 전 대체값).
+  width: 1280
+  height: 720
+  K: [955.4046808917496, 0.0, 680.6881205097441,
+      0.0, 953.9151858754207, 402.5289587417247,
+      0.0, 0.0, 1.0]
+  D: [0.021758365731293736, -0.07377388572024729,
+      -0.001476912295302247, 0.0014777700349652531, 0.0]
+
+aruco:
+  # 부스 마커는 디자이너가 8 cm로 인쇄했다(2026-10-31). aruco_tracker.yaml은 15 cm라 Pi 패드 노드가
+  # /aruco_tracker marker_size를 이 값으로 맞춘다(scripts/robot.sh install이 booth.env로 넘긴다).
+  marker_size_m: 0.08
+  # marker_track.yaml. /aruco_detections는 보정 전 원시값이라 3D 표시에는 이 계수를 곱한다.
+  pnp_translation_scale: 0.960729786
+  # 영상과 검출을 같은 프레임으로 맞추려고 영상을 이만큼까지 붙잡아 둔다.
+  sync_hold_s: 0.25
+
+imu:
+  # mr_description robot_params.yaml imu_xyz_m / imu_rpy_deg (2026-10-31 실측).
+  xyz_m: [0.010, -0.160, 0.090]
+  rpy_deg: [-1.0, 2.1, 177.5]
+
+battery:
+  # 판정은 사용자 아티팩트 "배터리 잔량표"(2026-10-30, claude.ai/artifact/BkUGHXPsNzimrui8qNY4KC)를 따른다.
+  # /base/status supply_voltage는 역극성 보호 다이오드(SR540) 뒤에서 재서 배터리 단자보다 낮다.
+  # 실측: 10-30 단자 13.16 대 토픽 12.87, 10-31 단자 13.09 대 토픽 12.82.
+  diode_drop_v: 0.30
+  # 4S LiFePO4 휴지 전압(배터리 단자) → 잔량. 30~80 %가 0.3 V 안에 몰려 있어서 화면에는 ±0.05 V가
+  # 만드는 잔량 범위를 같이 보인다. 주행 중에는 처져서 낮게 나온다.
+  soc_table:
+    - [11.20, 0]
+    - [12.00, 5]
+    - [12.40, 10]
+    - [12.85, 20]
+    - [13.00, 30]
+    - [13.05, 40]
+    - [13.10, 50]
+    - [13.15, 60]
+    - [13.20, 70]
+    - [13.28, 80]
+    - [13.36, 90]
+    - [13.42, 95]
+    - [13.60, 100]
+  # 판정 기준은 토픽 값. 아래로 내려가면 충전 권장(단자 약 12.9 V, 잔량 약 20 %), 즉시 충전(셀당 약 3.07 V).
+  # 표 맨 위 - 다이오드 + 0.05 V보다 높으면 충전 중이거나 막 뗀 표면 전압으로 본다.
+  charge_at_v: 12.6
+  stop_at_v: 12.0
+  filter_tau_s: 20.0
+
+cloud:
+  # mr_care_telemetry 설정과 같은 DB. 서비스 계정이 없으면 클라우드 칸은 "확인 불가"로 남는다.
+  enabled: true
+  robot_id: mr-001
+  database_url: https://senior-care-nyr-default-rtdb.asia-southeast1.firebasedatabase.app
+  service_account_path: ~/.config/mr_care_telemetry/service-account.json
+  telemetry_src: ~/dev/mobile-robot/software/ros_pkgs/mr_care_telemetry
+  status_period_s: 3.0
+  # 대시보드가 쓰는 온라인 판정과 같다(care-telemetry README 3.1).
+  online_age_s: 15.0
+
+pi:
+  # 전원 저전압 이력이 있는 Pi라 온도·스로틀을 같이 본다. ssh가 안 되면 칸이 비어 있을 뿐이다.
+  enabled: true
+  ssh_host: rpi5
+  period_s: 5.0
+
+stack:
+  # Pi 스택(robot/, systemd mr-booth.target). scripts/robot.sh install이 Pi ~/booth/booth.env로 옮긴다.
+  # 추적할 ArUco ID. follow.launch.py 기본값은 0이라 넘기지 않으면 조끼(0)를 찾는다.
+  marker_id: 2
+  # 패드 A·대시보드 출발이 앱에 보일 출발지·목적지 (config/places.yaml 키)
+  trip_from: place_home
+  trip_to: place_senior_center
+  # 대시보드가 보여 주는 유닛 순서. mr-booth@NAME
+  units: [follow, phone_bridge, mission, telemetry, pad]

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>돌봄 로봇 기술 대시보드</title>
+</head>
+<body>
+  <div id="app">
+    <header id="head">
+      <div class="title-block">
+        <p class="section">SENIOR CARE · 기술 시연</p>
+        <h1>돌봄 로봇 실시간 상태</h1>
+      </div>
+      <div id="pills"></div>
+      <div class="head-right">
+        <span id="sim" hidden>시뮬레이션</span>
+        <span id="clock" class="mono"></span>
+      </div>
+    </header>
+
+    <section id="cam-panel" class="panel">
+      <div class="panel-head">
+        <h2>카메라 · ArUco 인식</h2>
+        <span class="mono sub" id="cam-meta">신호 없음</span>
+      </div>
+      <div class="cam-body">
+        <canvas id="cam-canvas"></canvas>
+        <div id="cam-empty">영상 없음</div>
+        <div id="cam-readout">
+          <div class="ro-status"><span id="mk-status" class="chip">마커 없음</span><span id="mk-id" class="mono"></span></div>
+          <div class="ro-main">
+            <span class="ro-label">로봇까지 거리</span>
+            <span class="ro-big"><span id="mk-range">-</span><span class="unit mono">m</span></span>
+          </div>
+          <div class="ro-grid">
+            <span class="ro-label">방위</span><span id="mk-bearing" class="mono">-</span>
+            <span class="ro-label">전방 · 좌측</span><span id="mk-xy" class="mono">-</span>
+            <span class="ro-label">마커 방향</span><span id="mk-yaw" class="mono">-</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="twin-panel" class="panel">
+      <div class="panel-head">
+        <h2>디지털 트윈 · 오도메트리</h2>
+        <span class="mono sub" id="twin-meta"></span>
+      </div>
+      <div class="twin-body">
+        <div id="twin"></div>
+        <div class="legend">
+          <span><i class="sw sw-odom"></i>바퀴 오도메트리</span>
+          <span><i class="sw sw-gyro"></i>바퀴 거리 + 자이로 방위</span>
+          <span><i class="sw sw-marker"></i>인식한 마커</span>
+        </div>
+      </div>
+    </section>
+
+    <div class="bottom">
+    <section id="gauges" class="panel">
+      <div class="panel-head">
+        <h2>바퀴 속도</h2>
+        <span class="mono sub" id="gauge-meta"></span>
+      </div>
+      <div class="gauge-row">
+        <canvas id="gauge-l"></canvas>
+        <canvas id="gauge-r"></canvas>
+      </div>
+    </section>
+
+    <section id="imu-panel" class="panel">
+      <div class="panel-head">
+        <h2>IMU · 관성 센서</h2>
+        <span class="mono sub" id="imu-meta"></span>
+      </div>
+      <div class="imu-body">
+        <canvas id="gmeter"></canvas>
+        <div class="imu-charts">
+          <canvas id="chart-yaw"></canvas>
+          <canvas id="chart-speed"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section id="bat-panel" class="panel">
+      <div class="panel-head">
+        <h2>배터리</h2>
+        <span class="mono sub">4S LiFePO4</span>
+      </div>
+      <div class="bat-body">
+        <div class="bat-big"><span id="bat-soc">-</span><span class="unit">%</span></div>
+        <p class="bat-note" id="bat-note">추정 잔량</p>
+        <div id="bat-bar"></div>
+        <div class="bat-v"><span id="bat-v" class="mono">-</span><span class="mono unit">V</span></div>
+        <canvas id="bat-chart"></canvas>
+      </div>
+    </section>
+
+    <section id="sys-panel" class="panel">
+      <div class="panel-head">
+        <h2>시스템</h2>
+        <span class="mono sub" id="sys-meta"></span>
+        <div id="ops">
+          <button class="op go" id="op-start" title="출발 (S)">출발</button>
+          <button class="op stop" id="op-stop" title="멈춤 (Space)">멈춤</button>
+          <button class="op hold" id="op-restart" title="1.5초 누르고 있으면 Pi 스택을 다시 띄운다">재시작</button>
+          <button class="op hold" id="op-mcu" title="1.5초 누르고 있으면 ST-Link로 MCU를 리셋한다">MCU</button>
+        </div>
+      </div>
+      <div id="sys-rows"></div>
+      <div id="events"></div>
+    </section>
+    </div>
+
+    <section id="flow" class="panel"></section>
+  </div>
+  <div id="offline" hidden>데이터 연결 끊김, 다시 연결하는 중</div>
+  <div id="toast" hidden></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

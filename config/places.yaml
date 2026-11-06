@@ -1,0 +1,96 @@
+# 시연용 장소 프리셋. scripts/robot.sh places가 Pi ~/ros2_ws/config/places.yaml로 올리고 폰 브리지를 다시 띄운다.
+# 형식은 mr_phone_bridge places/store.py(PROTOCOL.md 4.1). revision은 올릴 때 지금 시각으로 바꾼다.
+# 경희대 국제캠퍼스 주변. 좌표는 OpenStreetMap 위치(2026-10-31), 집·경로당·약국은 임의.
+version: 1
+revision: '2026-10-31T00:00:00.000Z'
+places:
+  place_home:
+    kind: home
+    label: 우리 집
+    lat: 37.2372
+    lon: 127.0718
+    radius_m: 30
+    enabled: true
+    sort_order: 1
+    is_default_origin: true
+    address: 경기 용인시 기흥구 서천동 서천마을2단지
+  place_senior_center:
+    kind: senior_center
+    label: 서천마을 경로당
+    lat: 37.2381
+    lon: 127.0709
+    radius_m: 30
+    enabled: true
+    sort_order: 2
+    is_default_origin: false
+    address: 경기 용인시 기흥구 서천동
+  place_senior_center_2:
+    kind: senior_center
+    label: 영통 복지관
+    lat: 37.25069
+    lon: 127.07736
+    radius_m: 40
+    enabled: true
+    sort_order: 3
+    is_default_origin: false
+    address: 경기 수원시 영통구 반달로 45
+  place_church:
+    kind: church
+    label: 서천동성당
+    lat: 37.23423
+    lon: 127.07435
+    radius_m: 40
+    enabled: true
+    sort_order: 4
+    is_default_origin: false
+    address: 경기 용인시 기흥구 서천동로 75
+  place_mart:
+    kind: mart
+    label: 이마트 서천점
+    lat: 37.23602
+    lon: 127.0726
+    radius_m: 30
+    enabled: true
+    sort_order: 5
+    is_default_origin: false
+    address: 경기 용인시 기흥구 서천로
+  place_mart_2:
+    kind: mart
+    label: 홈플러스 영통점
+    lat: 37.25184
+    lon: 127.07258
+    radius_m: 60
+    enabled: true
+    sort_order: 6
+    is_default_origin: false
+    address: 경기 수원시 영통구 봉영로 1576
+  place_hospital:
+    kind: hospital
+    label: 홍내과의원
+    lat: 37.24385
+    lon: 127.0665
+    radius_m: 30
+    enabled: true
+    sort_order: 7
+    is_default_origin: false
+    address: 경기 용인시 기흥구 영통로200번길
+  place_pharmacy:
+    kind: pharmacy
+    label: 단골 약국
+    lat: 37.2527
+    lon: 127.0738
+    radius_m: 30
+    enabled: true
+    sort_order: 8
+    is_default_origin: false
+    address: 경기 수원시 영통구 영통동
+  place_other:
+    kind: other
+    label: 호수공원 산책
+    lat: 37.23914
+    lon: 127.10013
+    radius_m: 100
+    enabled: true
+    sort_order: 9
+    is_default_origin: false
+    address: 경기 용인시 기흥구 공세동
