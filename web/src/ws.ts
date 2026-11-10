@@ -10,19 +10,37 @@ export interface Handlers {
 /** 브리지 WebSocket. 끊기면 1 s 간격으로 다시 붙는다(부스에서 브리지를 재시작해도 화면은 그대로 둔다). */
 export class Bridge {
   private ws: WebSocket | null = null;
+  private tokenRequest?: { resolve: (url: string) => void; reject: (e: Error) => void; timer: number };
+  requestLiveToken(): Promise<string> {
+    if (this.ws?.readyState !== WebSocket.OPEN) return Promise.reject(new Error('bridge_offline'));
+    if (this.tokenRequest) return Promise.reject(new Error('busy'));
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.tokenRequest = undefined; reject(new Error('timeout'));
+      }, 15000);
+      this.tokenRequest = { resolve, reject, timer };
+      this.send({ cmd: 'live_token' });
+    });
+  }
   constructor(private h: Handlers) { this.open(); }
 
   private open() {
     const ws = new WebSocket(`ws://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => this.h.link(true);
-    ws.onclose = () => { this.h.link(false); this.ws = null; setTimeout(() => this.open(), 1000); };
+    ws.onclose = () => { this.h.link(false); this.ws = null;
+      if (this.tokenRequest) { clearTimeout(this.tokenRequest.timer); this.tokenRequest.reject(new Error('bridge_offline')); this.tokenRequest = undefined; } setTimeout(() => this.open(), 1000); };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => {
       if (typeof ev.data === 'string') {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'state') this.h.state(msg as State);
         else if (msg.type === 'hello') this.h.hello(msg as Hello);
+        else if (msg.type === 'live_token' && this.tokenRequest) {
+          const pending = this.tokenRequest; this.tokenRequest = undefined; clearTimeout(pending.timer);
+          if (msg.ok && typeof msg.signed_url === 'string') pending.resolve(msg.signed_url);
+          else pending.reject(new Error(msg.error || 'invalid_response'));
+        }
         return;
       }
       const buf = ev.data as ArrayBuffer;

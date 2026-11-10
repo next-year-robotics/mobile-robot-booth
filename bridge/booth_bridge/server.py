@@ -20,6 +20,7 @@ from pathlib import Path
 
 import websockets
 
+from .live_token import issue_token
 from .ops import Ops
 from .overlay import CameraModel, FrameSync
 from .state import BoothState
@@ -42,13 +43,13 @@ class BoothServer:
         self.state_period = 1.0 / float(cfg['server']['state_rate_hz'])
 
     # ------------------------------------------------------------ HTTP
-    def process_request(self, path: str, _headers):
+    async def process_request(self, path: str, _headers):
         path = path.split('?', 1)[0]
         if path == '/ws':
             return None
         rel = 'index.html' if path in ('', '/') else path.lstrip('/')
         target = (self.static_dir / rel).resolve()
-        if not str(target).startswith(str(self.static_dir)) or not target.is_file():
+        if not target.is_relative_to(self.static_dir) or not target.is_file():
             if not (self.static_dir / 'index.html').is_file():
                 body = '웹 빌드가 없습니다. scripts/run.sh가 web/dist를 만듭니다.'.encode()
                 return http.HTTPStatus.SERVICE_UNAVAILABLE, [('Content-Type', 'text/plain; charset=utf-8')], body
@@ -57,21 +58,46 @@ class BoothServer:
         if ctype.startswith('text/') or ctype.endswith('javascript'):
             ctype += '; charset=utf-8'
         # index.html은 매번 새로 받아 새 빌드가 바로 보이게 한다. 해시 붙은 자산은 오래 둔다.
-        cache = 'no-cache' if target.name == 'index.html' else 'max-age=3600'
-        return http.HTTPStatus.OK, [('Content-Type', ctype), ('Cache-Control', cache)], target.read_bytes()
+        cache = 'no-cache' if target.name == 'index.html' or target.suffix in ('.vrm', '.mp3') else 'max-age=3600'
+        return http.HTTPStatus.OK, [('Content-Type', ctype), ('Cache-Control', cache)], await asyncio.to_thread(target.read_bytes)
 
     # ------------------------------------------------------------ WS
     async def handler(self, ws) -> None:
         self.clients.add(ws)
         log.info('브라우저 연결 %s (총 %d)', ws.remote_address, len(self.clients))
+        last_token = -float("inf")
+        token_task = None
+
+        async def send_token():
+            result = await asyncio.to_thread(issue_token, self.cfg.get('live', {}))
+            try:
+                await ws.send(json.dumps({'type': 'live_token', **result}))
+            except websockets.ConnectionClosed:
+                pass
         try:
             await ws.send(json.dumps(self.hello()))
             async for raw in ws:
                 if isinstance(raw, str):
-                    self.on_command(raw)
+                    try:
+                        msg = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if not isinstance(msg, dict):
+                        continue
+                    if msg.get('cmd') == 'live_token':
+                        if (token_task is not None and not token_task.done()) or time.monotonic() - last_token < 5:
+                            await ws.send(json.dumps({'type': 'live_token', 'ok': False, 'error': 'rate_limited'}))
+                        else:
+                            last_token = time.monotonic()
+                            token_task = asyncio.create_task(send_token())
+                    else:
+                        self.on_command(raw)
         except websockets.ConnectionClosed:
             pass
         finally:
+            if token_task is not None:
+                token_task.cancel()
+                await asyncio.gather(token_task, return_exceptions=True)
             self.clients.discard(ws)
             log.info('브라우저 끊김 (총 %d)', len(self.clients))
 
@@ -91,9 +117,16 @@ class BoothServer:
             msg = json.loads(raw)
         except ValueError:
             return
+        if not isinstance(msg, dict):
+            return
         cmd = msg.get('cmd')
         if cmd == 'reset_fused':
             self.state.reset_fused()
+        elif cmd == 'live_event':
+            phase = msg.get('phase')
+            duration = msg.get('duration_s')
+            if phase in ('start', 'end') and type(duration) is int and 0 <= duration <= 86400:
+                log.info('아바타 세션 %s duration_s=%d', phase, duration)
         elif isinstance(cmd, str) and cmd.startswith('op:'):
             self.ops.handle(cmd[3:])
 

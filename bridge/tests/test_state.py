@@ -122,3 +122,21 @@ def test_snapshot_is_strict_json(st):
     st.on_marker_track(0.0, {'status': 1, 'x': 1.0, 'y': 0.2, 'yaw': float('nan'), 'locked': True})
     st.on_detections(0.0, [(0, [1.5, 0.0, 0.9], [0, 0, 0, 1])])
     json.dumps(st.snapshot(0.1), allow_nan=False)
+
+
+def test_ptt_requires_config_and_releases_on_stale_or_timeout():
+    cfg = {**CFG, 'live': {'ptt_button': 4}}
+    s = BoothState(cfg)
+    s.on_joy(100, [0, 0, 0, 0, 1])
+    assert s.snapshot(100.1)['ptt'] is True
+    assert s.snapshot(100.6)['ptt'] is False
+    s.on_joy(130.1, [0, 0, 0, 0, 1])
+    assert s.snapshot(130.2)['ptt'] is False
+    s.on_joy(131, [0, 0, 0, 0, 0])
+    s.on_joy(132, [0, 0, 0, 0, 1])
+    assert s.snapshot(132.1)['ptt'] is True
+    s.on_joy(133, [])
+    assert s.snapshot(133.1)['ptt'] is False
+    disabled = BoothState({**CFG, 'live': {'ptt_button': None}})
+    disabled.on_joy(100, [1] * 16)
+    assert disabled.snapshot(100.1)['ptt'] is False

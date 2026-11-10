@@ -202,3 +202,50 @@ canvas { display: block; width: 100%; height: 100%; }
 
 #offline { position: fixed; top: 1.25rem; left: 50%; transform: translateX(-50%); background: var(--warn);
   color: var(--bg); font-weight: 600; font-size: 1rem; padding: 0.5rem 1.25rem; border-radius: 0.25rem; z-index: 10; }
+
+/* Avatar is isolated from the dashboard layout and rendering. */
+body.view-avatar #app { visibility: hidden; }
+#avatar-view { position: fixed; inset: 0; z-index: 5; background: var(--bg); overflow: hidden; }
+#avatar-view[hidden] { display: none; }
+.avatar-glow { position: absolute; inset: 0; background: radial-gradient(ellipse at 58% 44%, #344d48 0, #172329 35%, var(--bg) 70%); }
+#avatar-stage { position: absolute; inset: 0; }
+.avatar-head { position: absolute; top: 2rem; left: 2rem; right: 2rem; display: flex; align-items: center; justify-content: space-between; }
+#avatar-view button, .avatar-tab { color: var(--title); background: var(--panel); border: 1px solid var(--line-2); border-radius: 999px; padding: 0.8rem 1.5rem; font: 600 1.1rem var(--sans); cursor: pointer; }
+#avatar-view button:hover, .avatar-tab:hover { border-color: var(--accent); }
+#avatar-view button:focus-visible, .avatar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+kbd { font: 0.85em var(--mono); margin-left: 0.5rem; color: var(--sub); }
+#avatar-badge { border: 1px solid var(--line-2); border-radius: 999px; padding: 0.7rem 1.5rem; font-size: 1.1rem; background: var(--panel); }
+#avatar-badge[data-state="말하는 중"], #avatar-badge[data-state="듣는 중"] { color: var(--accent); border-color: var(--accent); }
+#avatar-robot { position: absolute; right: 3rem; top: 7rem; white-space: pre-line; font-size: 1rem; line-height: 1.8; text-align: right; color: var(--sub); }
+.avatar-footer { position: absolute; bottom: 0; width: 100%; text-align: center; padding: 3rem 2rem 1.1rem; background: linear-gradient(transparent, #0e1216ed 35%); }
+#avatar-caption { min-height: 3rem; max-width: 75rem; margin: 0 auto; font-size: 1.7rem; line-height: 1.4; color: var(--title); overflow-wrap: anywhere; }
+#avatar-detail { min-height: 2rem; color: var(--sub); font-size: 1rem; }
+.avatar-actions { display: flex; justify-content: center; gap: 0.75rem; margin: 0.8rem 0; }
+#avatar-ptt { background: var(--accent) !important; color: var(--bg) !important; min-width: 15rem; touch-action: none; }
+#avatar-ptt.held { box-shadow: 0 0 0 0.3rem #7cff4f40; }
+.avatar-hint { color: var(--sub); font-size: 0.875rem; margin-top: 1rem; }
+#avatar-stats { color: var(--sub); font-size: 0.7rem; min-height: 1rem; margin-top: 0.5rem; }
+.avatar-dev { position: absolute; top: 8rem; left: 2rem; display: flex; gap: 0.25rem; max-width: 25rem; flex-wrap: wrap; }
+.avatar-dev button { font-size: 0.8rem !important; padding: 0.3rem 0.6rem !important; }
+
+/* Audio-clock typography: individual rows enter once; no permanent greeting. */
+#avatar-name-card { position: absolute; left: 7%; top: 23%; opacity: 0; pointer-events: none; }
+.name-card-label { font: 600 0.85rem var(--mono); letter-spacing: 0.35em; color: var(--sub); margin-bottom: 1.5rem; }
+.name-word { font-size: 2.7rem; line-height: 1.22; letter-spacing: -0.035em; color: #aab6bf; opacity: 0; transform: translateY(0.7rem); filter: blur(4px); transition: opacity 180ms ease-out, transform 260ms cubic-bezier(.2,.8,.2,1), filter 220ms ease-out; }
+.name-word.revealed { opacity: 1; transform: translateY(0); filter: blur(0); }
+.name-word strong { font-weight: 900; color: #fff; }
+.name-word.connector { font-size: 1.4rem; line-height: 1.65; letter-spacing: 0; }
+
+@media (prefers-reduced-motion: reduce) { .name-word { transform: none; filter: none; transition: opacity 120ms; } }
+
+.avatar-credit { font-size: 0.62rem; color: var(--sub); margin-top: 0.25rem; }
+
+.avatar-dialogue { position: absolute; left: 7%; top: 29%; width: 27rem; }
+.avatar-dialogue #avatar-caption { font-size: 1.8rem; line-height: 1.6; text-align: left; }
+.avatar-dialogue #avatar-caption:empty { display: none; }
+
+/* Six large acronym rows; the connector shares Assistant's baseline. */
+#avatar-name-card { left: 5.5%; top: 23%; }
+.name-line { white-space: nowrap; line-height: 1.18; }
+.name-word { display: inline-block; font-size: 3.7rem; }
+.name-for { margin-left: 0.45em; font-size: 1.9rem; font-weight: 400; letter-spacing: 0; }

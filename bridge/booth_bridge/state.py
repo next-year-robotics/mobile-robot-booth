@@ -118,6 +118,9 @@ class BoothState:
         self.marker_scale = float(cfg['aruco']['pnp_translation_scale'])
         self.cam_origin = np.array(cfg['camera']['optical_origin_m'], dtype=float)
 
+        self.ptt_button = cfg.get('live', {}).get('ptt_button')
+        self.ptt_down = False
+        self.ptt_since = 0.0
         self.rates = {name: RateMeter() for name in RATE_TOPICS}
 
         # 바퀴
@@ -316,9 +319,14 @@ class BoothState:
             self.app = dict(s)
             self.app['time'] = now
 
-    def on_joy(self, now: float) -> None:
+    def on_joy(self, now: float, buttons=()) -> None:
         with self.lock:
             self.rates['joy'].tick(now)
+            b = self.ptt_button
+            down = type(b) is int and 0 <= b < len(buttons) and bool(buttons[b])
+            if down and not self.ptt_down:
+                self.ptt_since = now
+            self.ptt_down = down
 
     def current_trip_id(self) -> str | None:
         with self.lock:
@@ -432,6 +440,7 @@ class BoothState:
                 'type': 'state',
                 'sim': self.sim,
                 'wall_ms': int(time.time() * 1000),
+                'ptt': bool(self.ptt_down and ages['joy'] is not None and ages['joy'] < 0.5 and now - self.ptt_since < 30),
                 'rates': rates,
                 'ages': ages,
                 'wheels': {'l': wheel(0, 'left'), 'r': wheel(1, 'right')},

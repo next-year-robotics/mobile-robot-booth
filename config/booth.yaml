@@ -124,3 +124,11 @@ stack:
   trip_to: place_senior_center
   # 대시보드가 보여 주는 유닛 순서. mr-booth@NAME
   units: [follow, phone_bridge, mission, telemetry, pad]
+
+# Offline introduction works independently. Configure a private ElevenLabs Agent for live voice.
+live:
+  enabled: true
+  provider: elevenlabs
+  agent_id: ''
+  api_key_path: ~/.config/booth_dashboard/elevenlabs_api_key
+  ptt_button: null  # Enable only after measuring the spare X/Y button on the actual controller.

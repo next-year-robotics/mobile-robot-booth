@@ -214,9 +214,10 @@ export class Twin {
     this.setView('orbit');
 
     window.addEventListener('keydown', (e) => {
-      if (e.key === '1') this.setView('follow');
-      else if (e.key === '2') this.setView('orbit');
-      else if (e.key === '3') this.setView('top');
+      if (document.body.classList.contains('view-avatar')) return;
+      if (e.key === '4') this.setView('follow');
+      else if (e.key === '5') this.setView('orbit');
+      else if (e.key === '6') this.setView('top');
       else if (e.key === 'r' || e.key === 'R') this.reset();
     });
     new ResizeObserver(() => this.resize()).observe(this.host);

@@ -60,7 +60,7 @@ PIDS+=($!)
 if [[ $BROWSER -eq 1 ]]; then
   for _ in $(seq 40); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.25; done
   # 따로 만든 프로필이라 세션 복원 창이나 번역 막대가 뜨지 않는다.
-  google-chrome --user-data-dir="$HOME/.cache/booth-dashboard-chrome" --no-first-run \
+  google-chrome --user-data-dir="$HOME/.cache/booth-dashboard-chrome" --no-first-run --autoplay-policy=no-user-gesture-required \
     --disable-features=Translate --disable-session-crashed-bubble \
     --app="http://127.0.0.1:$PORT/" --start-fullscreen >/dev/null 2>&1 &
   PIDS+=($!)

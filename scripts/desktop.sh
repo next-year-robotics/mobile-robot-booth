@@ -33,6 +33,6 @@ if ! up; then
 fi
 exec 9>&-
 
-exec google-chrome --user-data-dir="$HOME/.cache/booth-dashboard-chrome" --no-first-run \
+exec google-chrome --user-data-dir="$HOME/.cache/booth-dashboard-chrome" --no-first-run --autoplay-policy=no-user-gesture-required \
   --disable-features=Translate --disable-session-crashed-bubble \
   --app="$URL" --start-maximized >/dev/null 2>&1

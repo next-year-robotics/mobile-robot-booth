@@ -64,7 +64,7 @@ class BoothNode(Node):
             self.create_subscription(TwistStamped, topic,
                                      lambda m, n=name: self.on_cmd(n, m), SENSOR)
         # 패드가 붙어 있으면 joy_linux가 30 Hz로 다시 낸다. 받는 빈도로 연결 여부만 본다.
-        self.create_subscription(Joy, topics['joy'], lambda _m: self.state.on_joy(time.monotonic()), SENSOR)
+        self.create_subscription(Joy, topics['joy'], lambda m: self.state.on_joy(time.monotonic(), m.buttons), SENSOR)
 
         self._optional('mr_msgs.msg', 'BaseStatus', topics['base_status'], self.on_base_status, SENSOR)
         self._optional('mr_aruco_msgs.msg', 'MarkerTrack', topics['marker_track'],

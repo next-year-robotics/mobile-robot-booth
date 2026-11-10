@@ -11,6 +11,7 @@ export interface CloudEvent { ts_ms: number | null; kind: string | null; severit
 
 export interface State {
   type: 'state';
+  ptt: boolean;
   sim: boolean;
   wall_ms: number;
   rates: Record<string, number>;
