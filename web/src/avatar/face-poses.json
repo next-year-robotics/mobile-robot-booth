@@ -1,0 +1,67 @@
+{
+  "laughing": {
+    "source": "laugh02.mhpose",
+    "face": {
+      "笑い": 0.432,
+      "ピンクほっぺ": 0.528,
+      "喜び.L": 0.266,
+      "喜び.R": 0.417
+    },
+    "mouth": {
+      "あは": 0.784
+    }
+  },
+  "thinking": {
+    "source": "doubt01.mhpose",
+    "face": {
+      "上.R": 0.322,
+      "下.L": 0.045,
+      "上を見る": 0.568,
+      "右を見る": 0.494
+    },
+    "mouth": {
+      "真顔口": 0.327
+    }
+  },
+  "determined": {
+    "source": "determination02.mhpose",
+    "face": {
+      "真面目.L": 0.312,
+      "真面目.R": 0.075,
+      "クール目": 0.211
+    },
+    "mouth": {
+      "にやり口": 0.294
+    }
+  },
+  "startled": {
+    "source": "surprise01.mhpose",
+    "face": {
+      "瞳小": 0.384,
+      "上.L": 0.412,
+      "上.R": 0.317
+    },
+    "mouth": {
+      "お": 0.518
+    }
+  },
+  "worried": {
+    "source": "sad02.mhpose",
+    "face": {
+      "困惑.L": 0.523,
+      "困惑.R": 0.578
+    },
+    "mouth": {
+      "えー": 0.51
+    }
+  },
+  "sleepy": {
+    "source": "sleep01.mhpose",
+    "face": {
+      "眠そうな目": 1.0
+    },
+    "mouth": {
+      "あ": 0.065
+    }
+  }
+}

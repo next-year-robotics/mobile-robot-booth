@@ -1,4 +1,4 @@
-# 부스 시연 스택 하나. mr-booth.target이 다섯 개(follow, phone_bridge, mission, telemetry, pad)를 띄운다.
+# 부스 시연 스택 하나. mr-booth.target이 여섯 개(follow, phone_bridge, mission, telemetry, pad, nav)를 띄운다.
 # scripts/robot.sh install이 /etc/systemd/system/에 넣는다.
 [Unit]
 Description=부스 시연 스택 %i

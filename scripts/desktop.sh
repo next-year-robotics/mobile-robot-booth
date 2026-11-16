@@ -2,7 +2,8 @@
 # 바탕화면 바로가기(부스 대시보드)가 부른다. 터미널 없이 돈다.
 #
 # 브리지가 안 떠 있으면 run.sh --no-browser를 뒤에서 띄우고, 대시보드를 최대화된 앱 창으로 연다.
-# 브리지가 이미 떠 있으면 창만 연다. 창을 닫아도 브리지는 남으니 다시 누르면 바로 뜬다.
+# 브리지가 이미 떠 있으면 창만 다시 연다(열려 있던 창은 닫는다). 창을 닫아도 브리지는 남으니 다시 누르면 바로 뜬다.
+# 전부 내리고 새로 띄우려면 바탕화면의 로봇 브링업(scripts/bringup.sh)을 누른다.
 # 로그는 ~/.cache/booth-dashboard/run.log
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,6 +34,6 @@ if ! up; then
 fi
 exec 9>&-
 
-exec google-chrome --user-data-dir="$HOME/.cache/booth-dashboard-chrome" --no-first-run --autoplay-policy=no-user-gesture-required \
-  --disable-features=Translate --disable-session-crashed-bubble \
-  --app="$URL" --start-maximized >/dev/null 2>&1
+# 창은 하나만 둔다. 열려 있던 대시보드 창이 있으면 닫고 새로 연다(여러 번 눌러도 창이 쌓이지 않는다).
+pkill -f -- "--user-data-dir=$HOME/.cache/booth-dashboard-chrome" 2>/dev/null && sleep 1
+exec "$ROOT/scripts/chrome.sh" "$URL" --start-maximized >/dev/null 2>&1

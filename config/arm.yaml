@@ -1,0 +1,137 @@
+# 로봇팔(SO-101 팔로워) 데몬 설정. arm/maknae_arm이 읽는다.
+#
+# 좌표는 모두 arm_base_link 기준이다(x 전방, y 왼쪽, z 위. mobile-robot URDF의 arm_mount_joint).
+# 각도는 LeRobot 도(deg, 보정 범위의 가운데가 0)이고 그리퍼만 0(닫힘)~100(열림)이다.
+
+server:
+  host: 127.0.0.1
+  port: 8091
+
+arm:
+  port: /dev/soarm_follower
+  id: tp_follower
+  # 모터 캘리브레이션(2026-11-02)은 팔 리포에 있다
+  calibration_dir: ~/dev/so101-pickplace/calib/lerobot/follower
+  urdf: ~/dev/mobile-robot/hardware/mobile_base/models/sim/mobile_robot.urdf
+  base_link: arm_base_link
+  tip_link: arm_gripper_frame_link
+  rate_hz: 50
+  # 가장 많이 도는 관절 기준 속도 [deg/s]
+  speed_deg_s: 70
+  slow_deg_s: 35
+  # 그리퍼가 이 전류[mA]를 넘기면 물건을 잡은 것으로 본다
+  grasp_current_ma: 120
+
+# URDF 각도 = LeRobot 각도 + 이 값 [deg]. 실측으로 맞춘다(tools/arm_calib.py).
+joint_offset_deg:
+  shoulder_pan: 0.0
+  shoulder_lift: 0.0
+  elbow_flex: 0.0
+  wrist_flex: 0.0
+  wrist_roll: 0.0
+
+poses:
+  # 접어 둔 자세. 주행할 때와 끝낼 때 여기로 온다.
+  rest: {shoulder_pan: 0, shoulder_lift: -104, elbow_flex: 96, wrist_flex: -100, wrist_roll: 0}
+  # 탑뷰 카메라를 가리지 않고 작업대 위에서 기다리는 자세
+  # (끝점 x 0.18, z 0.18: 받침보다 7 cm 높은 작업대에서도 11 cm 떠 있다)
+  ready: {shoulder_pan: 0, shoulder_lift: -80, elbow_flex: 30, wrist_flex: 80, wrist_roll: 0}
+  # 물건을 앞으로 내밀어 건네는 자세
+  handover: {shoulder_pan: 0, shoulder_lift: 10, elbow_flex: -10, wrist_flex: 0, wrist_roll: 0}
+
+# 던지기("던져 줘"). 들고 있을 때 팔을 back까지 당겼다가 front까지 빠르게 휘두르고, 휘두르는 도중에 집게를 연다.
+# 가볍고 무른 물건(귤, 테이프)만 던진다. 서보가 12 V에서 낼 수 있는 속도가 270 deg/s쯤이라 멀리 가지는 않는다.
+throw:
+  enabled: true
+  back: {shoulder_pan: 0, shoulder_lift: -70, elbow_flex: 80, wrist_flex: -60, wrist_roll: 0}
+  front: {shoulder_pan: 0, shoulder_lift: 5, elbow_flex: -5, wrist_flex: 10, wrist_roll: 0}
+  # 당길 때 속도와 휘두를 때 속도(가장 많이 도는 관절 기준, 최소저크 궤적의 최고 속도) [deg/s]
+  windup_deg_s: 60
+  speed_deg_s: 220
+  # 휘두르는 궤적의 이 비율에서 집게 열기를 보낸다. 집게가 벌어지는 데 0.1 s쯤 걸려서 가장 빠른 지점(0.5)보다 앞에 둔다.
+  # 물건이 위로 뜨면 늦추고(크게), 바닥으로 꽂히면 당긴다(작게).
+  release_at: 0.37
+  pause_s: 0.0
+
+# 장기자랑 팔춤. 화면 속 막내가 권루트 챌린지("L을 가져가")를 출 때 같은 음악에 맞춰 팔도 춘다(arm/maknae_arm/dance.py).
+# 집게를 끝까지 벌리면 두 집게가 L자가 된다. 시각은 전부 음악 시각[s]이다(음악 12.83 s, 150 BPM, 한 박 0.4 s).
+# 물건을 들고 있으면 팔은 쉬고 화면만 춘다.
+dance:
+  enabled: true
+  beat_s: 0.4
+  beat_offset_s: 0.0
+  # 팔을 들고 집게가 위를 보는 자세(끝점 x 0.21, z 0.50). L이 관람객 쪽에서 거꾸로(⅃) 보이면 wrist_roll을 180 쪽으로 돌린다
+  pose: {shoulder_pan: 0, shoulder_lift: 0, elbow_flex: -50, wrist_flex: -20, wrist_roll: 0}
+  # L 구간: 2박마다 좌우로 흔드는 폭(shoulder_pan, 끝점이 좌우 6 cm쯤)과 박마다 손목을 끄덕이는 폭
+  sway_deg: 18
+  bob_deg: 8
+  # 주먹 구간: 박마다 팔을 앞으로 뻗는 폭(elbow_flex)
+  pump_deg: 12
+  # 집게 벌림: L(끝까지), 주먹(닫음), 마지막 V 사인(반쯤)
+  l_open: 100
+  fist: 0
+  v_open: 45
+  # 4박마다 바뀌는 구간 [시작, 끝, 종류]. 아바타 모션의 왼손 검지 트랙에서 뽑았다
+  sections:
+    - [0.0, 1.6, L]
+    - [1.6, 3.2, fist]
+    - [3.2, 4.8, L]
+    - [4.8, 6.4, fist]
+    - [6.4, 8.0, L]
+    - [8.0, 9.6, fist]
+    - [9.6, 11.2, L]
+    - [11.2, 11.67, fist]
+    - [11.67, 12.83, V]
+  # 구간이 바뀔 때 섞는 시간
+  blend_s: 0.16
+  # 접힌 자세에서 춤 자세로 올라오는 시간(음악 시작부터). 짧을수록 팔꿈치가 빨리 돈다(2.0이면 약 140 deg/s)
+  enter_s: 2.0
+  # 서보가 목표를 따라오는 지연만큼 미리 보낸다. 팔이 음악보다 늦으면 키운다
+  lead_s: 0.08
+  # 음악이 끝난 뒤 V를 유지하는 시간. 그다음 접는다
+  hold_s: 0.6
+
+cameras:
+  top:
+    device: /dev/soarm_cam_top
+    width: 640
+    height: 480
+    fourcc: YUYV
+    fps: 30
+    intrinsics: ~/dev/so101-pickplace/calib/camera_top.yaml
+    # arm_base_link에서 본 카메라 광학 좌표계. 처음 값은 URDF(top_camera_joint - arm_mount_joint)이고
+    # tools/arm_calib.py가 실측으로 고친다.
+    xyz_m: [0.25591029, 0.0, 0.8676]
+    # 열이 카메라 x(영상 오른쪽)·y(영상 아래)·z(광축)의 방향이다. URDF로는 영상 위쪽이 로봇 전방이다.
+    rotation: [[0.0, -1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, -1.0]]
+  wrist:
+    device: /dev/soarm_cam_wrist
+    width: 640
+    height: 480
+    fourcc: MJPG
+    fps: 30
+
+workspace:
+  # 작업대 윗면 높이 [m]. 부스 탁자를 놓은 뒤 tools/arm_calib.py table로 잰다.
+  table_z_m: 0.0
+  # 집을 수 있는 범위. 밖이면 집지 않고 되묻는다.
+  x_m: [0.12, 0.40]
+  y_m: [-0.22, 0.22]
+  # 이 아래로는 끝점을 내리지 않는다(작업대 긁힘 방지 여유)
+  floor_clear_m: 0.002
+  hover_m: 0.09
+  # 끝점(고정 집게 끝)을 물건 중심에서 다무는 축 방향으로 이만큼 비켜 내린다. 물건이 두 집게 사이에 온다.
+  grasp_shift_m: 0.03
+  # 집게 끝을 작업대에서 이만큼 띄워 잡는다. 움직이는 집게는 호를 그리며 내려와서, 끝이 낮을수록 넓적한 물건의 옆구리를 문다.
+  grasp_clear_m: 0.008
+
+vision:
+  # zero-shot 물건 찾기. 2026-11-16 가짜 작업대 그림 비교: Hydrogen 찾기 3.9 s · 목록 6.7 s, Argon 8.2 s · 8~14 s, 점 오차는 둘 다 1~2 px.
+  # Hydrogen이 싸다(입력/출력 1.5/7.5 대 Argon 2/10, Argon은 12-01부터 4/20). 실물 작업대에서 엉뚱한 걸 집으면 gemini-4-argon으로 되돌린다
+  model: gemini-4-hydrogen
+  key_env_file: ~/.config/mobile-robot/gemini.env
+  timeout_s: 20
+  # 집는 순간(내려간 뒤, 다문 뒤)의 탑뷰·손목 사진을 여기 남긴다. 튜닝이 끝나면 지워도 된다.
+  debug_dir: ~/.cache/booth-dashboard/pick
+
+motions_dir: ~/.local/share/maknae/motions

@@ -64,7 +64,41 @@ def main() -> None:
     if cfg['pi']['enabled'] and not args.no_pi and not args.sim:
         PiWatcher(cfg['pi'], state, cfg['stack']['units']).start()
 
-    server = BoothServer(cfg, state, cam, sync, Path(args.static), Ops(cfg, state, node))
+    arm = None
+    if cfg.get('arm', {}).get('enabled'):
+        from .arm_link import ArmLink
+        arm = ArmLink(cfg['arm'], state, sim=args.sim)
+        arm.start()
+        import threading
+        state.pad_stop_hook = lambda: threading.Thread(target=arm.command, args=({'cmd': 'stop'},), daemon=True).start()
+
+    ops = Ops(cfg, state, node)
+    # 말로 시킨 이동·심부름의 순서기. ROS가 없으면(--no-ros) 요청을 받아도 "이동 노드가 꺼져 있다"로 거절한다.
+    from .layout import Layout
+    from .tasks import TaskRunner, Tasks
+    nav_cfg = cfg.get('nav', {})
+    # 시뮬레이션의 가짜 방 배치가 실제 부스 배치 파일을 덮지 않게 따로 둔다
+    layout_file = Path(args.config).with_name('layout.sim.yaml' if args.sim else 'layout.local.yaml')
+    layout = Layout(layout_file, list((nav_cfg.get('places') or {}).keys()))
+    state.pose_hook = layout.on_pose
+    tasks = Tasks(
+        cfg, nav_state=state.nav_status, arm_state=state.arm_state, mission_state=state.mission,
+        send_nav=(node.send_nav if node is not None else lambda cmd: False),
+        arm_command=(arm.command if arm is not None else lambda msg: {'ok': False, 'error': '팔이 연결돼 있지 않아요.'}),
+        stop_trip=lambda: ops.handle('stop'), publish=state.set_tasks, markers_alive=state.markers_alive, layout=layout)
+    TaskRunner(tasks).start()
+    stop_arm = state.pad_stop_hook
+
+    def pad_stop() -> None:
+        # 패드 B: 바퀴는 Pi가 세운다(errand_nav도 /joy를 듣는다). 여기서는 팔과 순서기를 같이 끝낸다.
+        tasks.cancel('패드')
+        if stop_arm is not None:
+            stop_arm()
+    state.pad_stop_hook = pad_stop
+
+    server = BoothServer(cfg, state, cam, sync, Path(args.static), ops, arm, tasks)
+    if node is not None:
+        node.on_scan_packet = server.put_scan
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:

@@ -119,10 +119,12 @@ class FrameSync:
         self.frames: deque[Frame] = deque(maxlen=16)
         self.overlays: OrderedDict[int, list] = OrderedDict()
         self.last_det: float | None = None
+        self.latest: Frame | None = None          # 내보냈든 아니든 가장 최근 영상(앞 보기가 쓴다)
 
     def add_frame(self, frame: Frame) -> None:
         with self.lock:
             self.frames.append(frame)
+            self.latest = frame
 
     def add_overlay(self, stamp_ns: int, now: float, overlay: list) -> None:
         with self.lock:

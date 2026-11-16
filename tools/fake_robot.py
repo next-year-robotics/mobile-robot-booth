@@ -5,8 +5,13 @@
 
 실제 로봇과 섞이지 않게 반드시 다른 도메인에서 띄운다(scripts/run.sh --sim이 77을 쓴다).
 
-장면: 작업자(마커 0)가 8자 경로를 걷고 로봇이 1.1 m 거리로 따라간다. 벽에 고정 마커 10이 있다.
+장면: 방 안에서 작업자(마커 0)가 8자 경로를 걷고 로봇이 1.1 m 거리로 따라간다. 벽에 고정 마커 10이 있고,
+config/booth.yaml nav.places의 마커가 책상과 벽에 붙어 있다. 라이다(/scan)는 벽·책상·작업자 다리를 2D로 쏜 값이다.
+
+명령에도 반응한다. /phone/trip_command 출발·취소로 따라가기를 켜고 끄고(--idle이면 꺼진 채 시작),
+/cmd_vel_align(robot/errand_nav.py)이 오면 그쪽이 바퀴를 잡는다. twist_mux의 우선순위와 같다.
 바퀴 오도메트리는 실제 바닥처럼 회전을 12.5 % 적게 잰다. 자이로는 참값이다.
+--intruder를 주면 30 s마다 6 s 동안 누군가 로봇 왼쪽 옆 20 cm까지 다가온다(따라가는 중의 접근 감지를 시험한다).
 영상은 바닥 격자와 마커를 원근 투영해 그린다. 검출은 영상보다 한 프레임 늦게 발행해 동기화 경로를 시험한다.
 """
 from __future__ import annotations
@@ -26,12 +31,12 @@ from aruco_opencv_msgs.msg import ArucoDetection, MarkerPose
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TwistStamped
 from mr_aruco_msgs.msg import MarkerTrack
-from mr_care_msgs.msg import PhoneLinkStatus, RobotAppStatus
+from mr_care_msgs.msg import PhoneLinkStatus, RobotAppStatus, TripCommand
 from mr_msgs.msg import BaseStatus
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, JointState
+from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, JointState, LaserScan
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'bridge'))
@@ -47,6 +52,49 @@ ODOM_TURN_SCALE = 0.875     # 바퀴가 자이로보다 회전을 12.5 % 적게 
 R_EFF, SEP_EFF = 0.04979, 0.30912
 MARKER_SIZE = 0.15
 TARGET_RANGE = 1.1
+MUX_TIMEOUT = 0.3
+
+# 방(odom 좌표). 벽은 선분, 가구는 상자다. 작업자의 8자(x -0.2~3.4, y ±1.1)와 겹치지 않게 둔다.
+ROOM = (-2.0, 5.6, -3.2, 3.2)                          # x0, x1, y0, y1
+BOXES = [(3.6, 4.3, 1.0, 2.2),                          # 책상
+         (3.25, 3.45, -0.9, -0.3),                      # 고정 마커 10이 붙은 기둥
+         (-1.6, -0.9, -2.9, -2.2)]                      # 상자 더미
+# 장소 마커를 붙일 자리: (위치, 바깥 법선). nav.places 순서대로 쓴다.
+PLACE_SPOTS = [((3.6, 1.6, 0.41), (-1.0, 0.0)),         # 책상 앞면
+               ((0.6, -3.2, 0.41), (0.0, 1.0)),         # 남쪽 벽
+               ((-2.0, 1.2, 0.41), (1.0, 0.0))]         # 서쪽 벽
+LIDAR_RAYS = 720
+LIDAR_MAX = 12.0
+
+
+def scene_segments() -> np.ndarray:
+    """(N, 4) 선분 x1 y1 x2 y2."""
+    x0, x1, y0, y1 = ROOM
+    segs = [(x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)]
+    for bx0, bx1, by0, by1 in BOXES:
+        segs += [(bx0, by0, bx1, by0), (bx1, by0, bx1, by1), (bx1, by1, bx0, by1), (bx0, by1, bx0, by0)]
+    return np.array(segs)
+
+
+def raycast(origin: np.ndarray, angles: np.ndarray, segs: np.ndarray, circles: list[tuple[float, float, float]]) -> np.ndarray:
+    """origin에서 angles 방향으로 쏜 광선이 처음 닿는 거리. 안 닿으면 inf."""
+    d = np.stack([np.cos(angles), np.sin(angles)], axis=1)              # (R, 2)
+    a, b = segs[:, :2], segs[:, 2:]
+    e = b - a                                                            # (S, 2)
+    ao = a - origin                                                      # (S, 2)
+    den = d[:, None, 0] * e[None, :, 1] - d[:, None, 1] * e[None, :, 0]  # (R, S)
+    den = np.where(np.abs(den) < 1e-12, np.nan, den)
+    t = (ao[None, :, 0] * e[None, :, 1] - ao[None, :, 1] * e[None, :, 0]) / den
+    u = (ao[None, :, 0] * d[:, None, 1] - ao[None, :, 1] * d[:, None, 0]) / den
+    hit = np.where((t > 0) & (u >= 0) & (u <= 1), t, np.inf)
+    best = np.nanmin(np.where(np.isnan(hit), np.inf, hit), axis=1)
+    for cx, cy, r in circles:
+        oc = origin - np.array([cx, cy])
+        bq = d @ oc
+        disc = bq * bq - (oc @ oc - r * r)
+        tc = np.where(disc >= 0, -bq - np.sqrt(np.maximum(disc, 0)), np.inf)
+        best = np.minimum(best, np.where(tc > 0, tc, np.inf))
+    return best
 
 
 def stamp_of(t: float) -> Time:
@@ -82,7 +130,14 @@ class FakeRobot(Node):
         self.r_imu = np.array(cfg['imu']['xyz_m'])
         self.scale = cfg['aruco']['pnp_translation_scale']
         d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.marker_img = {mid: self._marker_image(d, mid) for mid in (0, 10)}
+        nav = cfg.get('nav', {})
+        self.places = [(int(pl['marker_id']), np.array(pos), np.array(normal))
+                       for pl, (pos, normal) in zip((nav.get('places') or {}).values(), PLACE_SPOTS)]
+        self.marker_img = {mid: self._marker_image(d, mid) for mid in (0, 10, *(p[0] for p in self.places))}
+        lidar = cfg.get('lidar', {})
+        self.lidar_xy = np.array(lidar.get('xyz_m', [0.018, -0.004, 0.25])[:2], dtype=float)
+        self.lidar_yaw = math.radians(lidar.get('rpy_deg', [0, 0, 177.5])[2])
+        self.segs = scene_segments()
 
         self.pub_js = self.create_publisher(JointState, '/joint_states', BE)
         self.pub_status = self.create_publisher(BaseStatus, '/base/status', BE)
@@ -96,6 +151,13 @@ class FakeRobot(Node):
         self.pub_follow = self.create_publisher(TwistStamped, '/cmd_vel_follow', REL)
         self.pub_link = self.create_publisher(PhoneLinkStatus, '/phone/link_status', LATCHED)
         self.pub_app = self.create_publisher(RobotAppStatus, '/robot/app_status', LATCHED)
+        self.pub_scan = self.create_publisher(LaserScan, '/scan', BE)
+        self.pub_filtered = self.create_publisher(Odometry, '/odometry/filtered', REL)
+        self.create_subscription(TripCommand, '/phone/trip_command', self.on_trip, REL)
+        self.create_subscription(TwistStamped, '/cmd_vel_align', self.on_nav_cmd, REL)
+        self.following = '--idle' not in sys.argv
+        self.trip_id = 'demo-trip' if self.following else ''
+        self.nav_cmd = (-1e9, 0.0, 0.0)
 
         # 참값 상태
         self.t0 = time.time()
@@ -119,6 +181,7 @@ class FakeRobot(Node):
         # 영상 그리기와 JPEG 압축이 100 Hz 동역학 타이머를 밀지 않게 따로 돈다(cv2는 GIL을 놓는다).
         threading.Thread(target=self._camera_loop, daemon=True).start()
         self.create_timer(1.0, self.slow_tick)
+        self.create_timer(0.1, self.publish_scan)
         self.publish_link(True)
 
     @staticmethod
@@ -160,6 +223,8 @@ class FakeRobot(Node):
         out.append((0, p_base, marker_frame(normal)))
         dp, dn = self.dock
         out.append((10, self.to_base(dp), marker_frame(self.rot_to_base(dn))))
+        for mid, pos, normal in self.places:
+            out.append((mid, self.to_base(pos), marker_frame(self.rot_to_base(normal))))
         seen = []
         for mid, p, R in out:
             h = MARKER_SIZE / 2
@@ -182,7 +247,18 @@ class FakeRobot(Node):
         seen = {mid: p for mid, p, _ in self.visible_markers(t)}
 
         # 추종 제어(follow.yaml 게인·한계)를 20 Hz로
-        if self.k % 5 == 0:
+        nav_live = time.monotonic() - self.nav_cmd[0] < MUX_TIMEOUT
+        if nav_live:
+            # errand_nav가 몬다(twist_mux align 자리). 그대로 /cmd_vel로 나간다
+            self.cmd = self.nav_cmd[1:]
+            if self.k % 5 == 0:
+                self.publish_cmd_out(now)
+                if self.following:
+                    # 실제 추종 노드는 mux에서 밀려도 지령을 계속 낸다(접근 감지가 이것으로 따라가는 중인지 안다)
+                    self.pub_follow.publish(TwistStamped())
+        elif not self.following:
+            self.cmd = (0.0, 0.0)
+        elif self.k % 5 == 0:
             if 0 in seen:
                 p = seen[0]
                 rng, brg = math.hypot(p[0], p[1]), math.atan2(p[1], p[0])
@@ -198,12 +274,7 @@ class FakeRobot(Node):
                 # 놓치면 마지막 방위 쪽으로 돌고, 너무 가까웠으면 조금 물러난다
                 rng, brg = getattr(self, 'last_fix', (2.0, 1.0))
                 self.cmd = (-0.08 if rng < 1.0 else 0.0, 0.5 if brg >= 0 else -0.5)
-            msg = TwistStamped()
-            msg.header.stamp = stamp_of(now)
-            msg.header.frame_id = 'base_footprint'
-            msg.twist.linear.x, msg.twist.angular.z = self.cmd
-            self.pub_follow.publish(msg)
-            self.pub_cmd.publish(msg)
+            self.pub_follow.publish(self.publish_cmd_out(now))
 
         # 가속 한계(0.4 m/s², 2 rad/s²)와 1차 지연
         v_prev = self.v
@@ -237,6 +308,49 @@ class FakeRobot(Node):
         if self.k % 10 == 0:
             self.publish_status(now, vl, vr)
 
+    def publish_cmd_out(self, now: float) -> TwistStamped:
+        msg = TwistStamped()
+        msg.header.stamp = stamp_of(now)
+        msg.header.frame_id = 'base_footprint'
+        msg.twist.linear.x, msg.twist.angular.z = self.cmd
+        self.pub_cmd.publish(msg)
+        return msg
+
+    def on_nav_cmd(self, m: TwistStamped) -> None:
+        self.nav_cmd = (time.monotonic(), m.twist.linear.x, m.twist.angular.z)
+
+    def on_trip(self, m: TripCommand) -> None:
+        self.following = m.command == TripCommand.COMMAND_START
+        self.trip_id = m.trip_id if self.following else ''
+        self.last_seen = None
+        self.publish_app(time.time())
+
+    def publish_scan(self) -> None:
+        now = time.time()
+        pp, heading = self.person(now - self.t0)
+        side = np.array([-heading[1], heading[0]]) * 0.09
+        legs = [(pp[0] + side[0], pp[1] + side[1], 0.06), (pp[0] - side[0], pp[1] - side[1], 0.06)]
+        c, s = math.cos(self.th), math.sin(self.th)
+        if '--intruder' in sys.argv and (now - self.t0) % 30.0 > 24.0:
+            # 로봇 왼쪽 옆(차체에서 20 cm)에 선 사람의 두 다리
+            for bx in (-0.02, 0.16):
+                legs.append((self.x + c * bx - s * 0.45, self.y + s * bx + c * 0.45, 0.06))
+        origin = np.array([self.x + c * self.lidar_xy[0] - s * self.lidar_xy[1],
+                           self.y + s * self.lidar_xy[0] + c * self.lidar_xy[1]])
+        inc = math.tau / LIDAR_RAYS
+        angles = -math.pi + inc * np.arange(LIDAR_RAYS)
+        r = raycast(origin, angles + self.th + self.lidar_yaw, self.segs, legs)
+        r = r + np.random.normal(0, 0.008, LIDAR_RAYS)
+        r[(r > LIDAR_MAX) | (np.random.random(LIDAR_RAYS) < 0.01)] = math.inf
+        m = LaserScan()
+        m.header.stamp = stamp_of(now)
+        m.header.frame_id = 'laser_link'
+        m.angle_min, m.angle_max, m.angle_increment = -math.pi, math.pi - inc, inc
+        m.scan_time, m.time_increment = 0.1, 0.1 / LIDAR_RAYS
+        m.range_min, m.range_max = 0.05, LIDAR_MAX
+        m.ranges = r.astype(np.float32).tolist()
+        self.pub_scan.publish(m)
+
     def publish_imu(self, now: float) -> None:
         w = np.array([0.0, 0.0, self.w])
         a = np.array([self.a_fwd, self.v * self.w, 9.81])
@@ -262,6 +376,14 @@ class FakeRobot(Node):
         m.twist.twist.linear.x = self.v
         m.twist.twist.angular.z = w_odom
         self.pub_odom.publish(m)
+        # EKF(바퀴 + 자이로) 자리. 자이로가 참값이라 참 자세를 그대로 낸다
+        f = Odometry()
+        f.header, f.child_frame_id = m.header, m.child_frame_id
+        f.pose.pose.position.x, f.pose.pose.position.y = self.x, self.y
+        f.pose.pose.orientation.z = math.sin(self.th / 2)
+        f.pose.pose.orientation.w = math.cos(self.th / 2)
+        f.twist.twist.linear.x, f.twist.twist.angular.z = self.v, self.w
+        self.pub_filtered.publish(f)
 
     def publish_status(self, now: float, vl: float, vr: float) -> None:
         m = BaseStatus()
@@ -401,15 +523,22 @@ class FakeRobot(Node):
         info.d = [float(v) for v in self.cam_cfg['D']]
         self.pub_info.publish(info)
         if int(now) % 2 == 0:
-            m = RobotAppStatus()
-            m.header.stamp = stamp_of(now)
-            m.robot_id = 'mr-001'
+            self.publish_app(now)
+
+    def publish_app(self, now: float) -> None:
+        m = RobotAppStatus()
+        m.header.stamp = stamp_of(now)
+        m.robot_id = 'mr-001'
+        if self.following:
             m.mission_state = RobotAppStatus.MISSION_ACTIVE
-            following = self.last_seen is not None and (now - self.t0) - self.last_seen < 1.0
-            m.tracking_state = RobotAppStatus.TRACKING_FOLLOWING if following else RobotAppStatus.TRACKING_SEARCHING
-            m.trip_id = 'demo-trip'
-            m.battery_percent = -1
-            self.pub_app.publish(m)
+            tracking = self.last_seen is not None and (now - self.t0) - self.last_seen < 1.0
+            m.tracking_state = RobotAppStatus.TRACKING_FOLLOWING if tracking else RobotAppStatus.TRACKING_SEARCHING
+        else:
+            m.mission_state = RobotAppStatus.MISSION_IDLE
+            m.tracking_state = RobotAppStatus.TRACKING_IDLE
+        m.trip_id = self.trip_id
+        m.battery_percent = -1
+        self.pub_app.publish(m)
 
     def publish_link(self, connected: bool) -> None:
         m = PhoneLinkStatus()

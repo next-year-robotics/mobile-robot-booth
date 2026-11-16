@@ -2,7 +2,7 @@
 
 노트북에서 Pi 토픽을 Wi-Fi로 받는다. 구독은 전부 BEST_EFFORT다. Pi 쪽 발행자가 RELIABLE이어도
 매칭되고, 그러면 Pi가 노트북용 재전송 버퍼를 잡지 않는다. 래치 토픽 둘만 TRANSIENT_LOCAL로 받는다.
-발행은 운영 버튼의 /phone/trip_command 하나다(RELIABLE).
+발행은 운영 버튼의 /phone/trip_command와 작업 순서기의 /nav/command 둘이다(RELIABLE).
 
 사용자 메시지(mr_msgs, mr_aruco_msgs, mr_care_msgs)는 scripts/build_msgs.sh가 만든 오버레이에서 온다.
 없으면 그 구독만 빼고 나머지는 띄운다.
@@ -18,6 +18,7 @@ from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy)
 
 from .overlay import CameraModel, Frame, FrameSync, marker_overlay
+from .scan import ScanShaper
 from .state import BoothState
 
 SENSOR = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=5)
@@ -48,14 +49,25 @@ class BoothNode(Node):
         self.pnp_scale = float(cfg['aruco']['pnp_translation_scale'])
         topics = cfg['ros']['topics']
         self.missing: list[str] = []
+        self.shaper = ScanShaper(cfg.get('lidar', {}))
+        self.on_scan_packet = None        # (머리 dict, 본문 bytes)를 받을 함수. 서버가 꽂는다
 
         from geometry_msgs.msg import TwistStamped
         from nav_msgs.msg import Odometry
-        from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, JointState, Joy
+        from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, JointState, Joy, LaserScan
+        from std_msgs.msg import String
+        import json
+        self._json, self._String = json, String
+        if cfg.get('lidar', {}).get('enabled', True):
+            self.create_subscription(LaserScan, topics.get('scan', '/scan'), self.on_scan, SENSOR)
+        # 이동 노드(robot/errand_nav.py). 명령은 놓치면 안 되니 RELIABLE, 상태는 5 Hz로 다시 오니 BEST_EFFORT로 받는다
+        self.nav_pub = self.create_publisher(String, topics.get('nav_command', '/nav/command'), RELIABLE)
+        self.create_subscription(String, topics.get('nav_status', '/nav/status'), self.on_nav_status, SENSOR)
 
         self.create_subscription(JointState, topics['joint_states'], self.on_joint_states, SENSOR)
         self.create_subscription(Imu, topics['imu'], self.on_imu, SENSOR)
         self.create_subscription(Odometry, topics['odom'], self.on_odom, SENSOR)
+        self.create_subscription(Odometry, topics.get('odom_filtered', '/odometry/filtered'), self.on_filtered, SENSOR)
         self.create_subscription(CompressedImage, topics['image'], self.on_image, IMAGE)
         self.create_subscription(CameraInfo, topics['camera_info'], self.on_camera_info, SENSOR)
         self.create_subscription(TwistStamped, topics['cmd_vel'],
@@ -63,8 +75,8 @@ class BoothNode(Node):
         for name, topic in topics['cmd_inputs'].items():
             self.create_subscription(TwistStamped, topic,
                                      lambda m, n=name: self.on_cmd(n, m), SENSOR)
-        # 패드가 붙어 있으면 joy_linux가 30 Hz로 다시 낸다. 받는 빈도로 연결 여부만 본다.
-        self.create_subscription(Joy, topics['joy'], lambda m: self.state.on_joy(time.monotonic(), m.buttons), SENSOR)
+        # joy_linux가 버튼과 십자키 축을 30 Hz로 다시 낸다.
+        self.create_subscription(Joy, topics['joy'], lambda m: self.state.on_joy(time.monotonic(), m.buttons, m.axes), SENSOR)
 
         self._optional('mr_msgs.msg', 'BaseStatus', topics['base_status'], self.on_base_status, SENSOR)
         self._optional('mr_aruco_msgs.msg', 'MarkerTrack', topics['marker_track'],
@@ -77,6 +89,7 @@ class BoothNode(Node):
                        self.on_app_status, LATCHED)
         # 운영 버튼 출발·멈춤. 앱 브리지와 같은 토픽·QoS(mr_care_msgs TripCommand.msg)
         self.trip_pub = None
+        self._sos_pubs = None
         try:
             from mr_care_msgs.msg import TripCommand
             self._TripCommand = TripCommand
@@ -86,6 +99,45 @@ class BoothNode(Node):
         if self.missing:
             self.get_logger().warn(
                 f'메시지 타입이 없어 빠진 구독: {", ".join(self.missing)} — scripts/build_msgs.sh 확인')
+
+    def send_sos(self, *, raise_: bool, sos_id: str) -> bool:
+        """음성 "도와줘"·대시보드 SOS. 앱의 SOS 버튼과 같은 토픽(/phone/sos_raise, /phone/sos_cancel)으로 낸다."""
+        try:
+            from mr_care_msgs.msg import SosClear, SosRequest
+        except ImportError:
+            return False
+        if self._sos_pubs is None:
+            self._sos_pubs = (self.create_publisher(SosRequest, '/phone/sos_raise', RELIABLE),
+                              self.create_publisher(SosClear, '/phone/sos_cancel', RELIABLE))
+        if raise_:
+            m = SosRequest()
+            m.reason = SosRequest.REASON_MANUAL
+        else:
+            m = SosClear()
+            m.resolution = SosClear.RESOLUTION_CANCELLED
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.sos_id = sos_id
+        self._sos_pubs[0 if raise_ else 1].publish(m)
+        return True
+
+    def send_nav(self, cmd: dict) -> bool:
+        self.nav_pub.publish(self._String(data=self._json.dumps(cmd)))
+        return True
+
+    def on_nav_status(self, m) -> None:
+        try:
+            status = self._json.loads(m.data)
+        except ValueError:
+            return
+        if isinstance(status, dict):
+            self.state.on_nav(time.monotonic(), status)
+
+    def on_scan(self, m) -> None:
+        shaped = self.shaper.shape(m.ranges, m.angle_min, m.angle_increment, m.range_min, m.range_max)
+        self.state.on_scan(time.monotonic(), len(shaped['points']), shaped['nearest'])
+        if self.on_scan_packet is not None:
+            pose, odom = self.state.scan_poses(time.monotonic())
+            self.on_scan_packet(*self.shaper.pack(shaped, pose, odom))
 
     def can_trip(self) -> bool:
         return self.trip_pub is not None
@@ -134,6 +186,10 @@ class BoothNode(Node):
         p, t = m.pose.pose, m.twist.twist
         self.state.on_odom(time.monotonic(), p.position.x, p.position.y, _yaw(p.orientation),
                            t.linear.x, t.angular.z)
+
+    def on_filtered(self, m) -> None:
+        p = m.pose.pose
+        self.state.on_filtered(time.monotonic(), p.position.x, p.position.y, _yaw(p.orientation))
 
     def on_marker_track(self, m) -> None:
         self.state.on_marker_track(time.monotonic(), {

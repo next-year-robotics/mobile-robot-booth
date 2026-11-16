@@ -14,3 +14,8 @@ Platinum_v1.3.zip
 VRMA_MotionPack/
 VRMA_MotionPack.zip
 ElevenLabs*.mp3
+ros_ws/src/
+config/arm.local.yaml
+config/layout.local.yaml
+config/layout.sim.yaml
+web/tests/fixtures/

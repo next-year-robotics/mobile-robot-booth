@@ -8,7 +8,8 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:browser": "node tests/avatar.browser.cjs"
+    "test:browser": "node tests/avatar.browser.cjs",
+    "voice-eval": "tsx tests/voice_eval.ts"
   },
   "dependencies": {
     "@elevenlabs/client": "1.35.0",

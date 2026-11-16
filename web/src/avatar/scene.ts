@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils, type VRM } from '@pixiv/three-vrm';
+import type { DialogueFrame } from './dialogue';
 import { Motion } from './motion';
 
 export class AvatarScene {
@@ -11,10 +12,12 @@ export class AvatarScene {
   private last = 0;
   private raf = 0;
   private time = 0;
+  private headHeight = 0;
+  private framing = 0;
   private frames = 0;
   private measureAt = 0;
   motion?: Motion;
-  constructor(private host: HTMLElement, private stats: HTMLElement, private level: () => number, private introTime: () => number | null, private onFrame: (time: number | null) => void, private idleAllowed: () => boolean) {
+  constructor(private host: HTMLElement, private stats: HTMLElement, private voice: () => DialogueFrame, private introTime: () => number | null, private onFrame: (time: number | null) => void, private idleAllowed: () => boolean) {
     this.camera.up.set(0, 1, 0); // The robot twin sets THREE.DEFAULT_UP to Z. VRM uses Y.
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -43,6 +46,7 @@ export class AvatarScene {
     vrm.update(0);
     vrm.scene.updateMatrixWorld(true);
     const head = vrm.humanoid.getNormalizedBoneNode('head')!.getWorldPosition(new THREE.Vector3());
+    this.headHeight = head.y;
     this.camera.position.set(0, head.y - 0.12, 1.9);
     this.camera.lookAt(0, head.y - 0.12, 0);
     const target = new THREE.Object3D(); target.position.copy(this.camera.position); this.scene.add(target);
@@ -68,7 +72,13 @@ export class AvatarScene {
     const dt = Math.min(0.1, this.last ? (now - this.last) / 1000 : 1 / 30);
     this.last = now; this.time += dt;
     const introTime = this.introTime(); this.onFrame(introTime);
-    if (this.motion) { this.motion.mouth = this.level(); this.motion.update(dt, this.time, introTime, this.idleAllowed()); }
+    if (this.motion) { this.motion.update(dt, this.time, introTime, this.idleAllowed(), this.voice()); }
+    if (this.headHeight) {
+      this.framing += ((this.motion?.greeting.wideShot ?? 0) - this.framing) * (1 - Math.exp(-dt / 0.28));
+      const y = this.headHeight - 0.12 - this.framing * (this.headHeight / 2 - 0.12);
+      this.camera.position.set(0, y, 1.9 + this.framing * (this.headHeight * 2.85 - 1.9));
+      this.camera.lookAt(0, y, 0);
+    }
     const start = performance.now(); this.renderer.render(this.scene, this.camera); this.frames++;
     if (now - this.measureAt > 2000) {
       const info = this.renderer.info.render;

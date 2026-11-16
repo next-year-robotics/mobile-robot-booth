@@ -25,7 +25,7 @@ MUX_PRIORITY = ('teleop', 'align', 'follow')
 MUX_TIMEOUT_S = 0.3
 
 RATE_TOPICS = ('joint_states', 'base_status', 'imu', 'odom', 'marker_track', 'detections',
-               'image', 'cmd_vel', 'phone_link', 'app_status', 'joy')
+               'image', 'cmd_vel', 'phone_link', 'app_status', 'joy', 'scan', 'nav')
 
 
 def rpy_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -119,8 +119,18 @@ class BoothState:
         self.cam_origin = np.array(cfg['camera']['optical_origin_m'], dtype=float)
 
         self.ptt_button = cfg.get('live', {}).get('ptt_button')
+        self.dpad_held = False
+        self.dpad_hook = None
         self.ptt_down = False
         self.ptt_since = 0.0
+        # 패드 B(멈춤)는 Pi에서 바퀴를 세운다. 같은 버튼으로 팔도 세우게 여기서 눌림을 잡아 넘긴다.
+        self.pad_stop_button = cfg.get('arm', {}).get('stop_button')
+        self.pad_stop_down = False
+        self.pad_stop_hook = None
+        self.grip_session = 0
+        self.grip_value = None
+        self.rt_axis = cfg.get('arm', {}).get('rt_axis', 4)
+        self.lb_button = cfg.get('arm', {}).get('lb_button', 6)
         self.rates = {name: RateMeter() for name in RATE_TOPICS}
 
         # 바퀴
@@ -169,6 +179,12 @@ class BoothState:
         self.cloud: dict | None = None
         self.pi: dict | None = None
         self.ops: dict | None = None      # 운영 버튼 마지막 결과 (ops.py)
+        self.arm: dict | None = None      # 팔 데몬 상태 (arm_link.py). 데몬이 없으면 None
+        self.lidar: dict | None = None    # 마지막 스캔 요약 (scan.py)
+        self.filtered: tuple | None = None   # /odometry/filtered (시각, x, y, yaw)
+        self.pose_hook = None
+        self.nav: dict | None = None      # Pi errand_nav의 /nav/status
+        self.tasks: dict | None = None    # 작업 순서기 (tasks.py)
 
     # ---------------------------------------------------------------- 바퀴
     def on_joint_states(self, now: float, pos: list[float], vel: list[float]) -> None:
@@ -319,18 +335,123 @@ class BoothState:
             self.app = dict(s)
             self.app['time'] = now
 
-    def on_joy(self, now: float, buttons=()) -> None:
+    def on_joy(self, now: float, buttons=(), axes=()) -> None:
         with self.lock:
+            age = self.rates['joy'].age(now)
+            # Xbox joy_linux의 HAT0X/Y. 왼쪽·위쪽이 양수다.
+            x, y = axes[6:8] if len(axes) >= 8 else (0, 0)
+            horizontal, vertical = abs(x) > 0.5, abs(y) > 0.5
+            direction = None
+            if age is not None and age < 0.5 and not self.dpad_held and horizontal != vertical:
+                if horizontal:
+                    direction = 'left' if x > 0 else 'right'
+                else:
+                    direction = 'up' if y > 0 else 'down'
+            self.dpad_held = horizontal or vertical
+            dpad_hook = self.dpad_hook
             self.rates['joy'].tick(now)
             b = self.ptt_button
             down = type(b) is int and 0 <= b < len(buttons) and bool(buttons[b])
             if down and not self.ptt_down:
                 self.ptt_since = now
             self.ptt_down = down
+            sb = self.pad_stop_button
+            stop = type(sb) is int and 0 <= sb < len(buttons) and bool(buttons[sb])
+            fire = stop and not self.pad_stop_down and self.pad_stop_hook is not None
+            self.pad_stop_down = stop
+            if age is None or age >= 0.5:
+                self.grip_value = None
+            if (stop or not 0 <= self.lb_button < len(buttons) or not buttons[self.lb_button]
+                    or not 0 <= self.rt_axis < len(axes) or not math.isfinite(axes[self.rt_axis])):
+                self.grip_value = None
+            else:
+                # joy_linux RT는 놓으면 +1, 끝까지 누르면 -1. 처음 5%는 완전 열림.
+                travel = min(1.0, max(0.0, (1 - axes[self.rt_axis]) / 2))
+                if self.grip_value is None and travel > 0.01:
+                    self.grip_session += 1
+                if self.grip_value is not None or travel > 0.01:
+                    self.grip_value = round(100 * min(1.0, (1 - travel) / 0.95))
+        if direction and dpad_hook:
+            dpad_hook(direction)
+        if fire:
+            self.pad_stop_hook()
+
+    def pad_grip(self, now: float):
+        with self.lock:
+            age = self.rates['joy'].age(now)
+            if self.grip_value is not None and age is not None and age < 0.5:
+                return self.grip_session, self.grip_value
+            return None
+
+    # ---------------------------------------------------------------- 라이다·이동
+    def on_scan(self, now: float, n: int, nearest: tuple[float, float, float] | None) -> None:
+        with self.lock:
+            self.rates['scan'].tick(now)
+            self.lidar = {'n': int(n), 'nearest': nearest}
+
+    def on_nav(self, now: float, status: dict) -> None:
+        with self.lock:
+            self.rates['nav'].tick(now)
+            self.nav = dict(status)
+
+    def nav_status(self, now: float | None = None) -> dict | None:
+        """이동 노드가 살아 있으면 마지막 보고. 2 s 넘게 조용하면 None(노드가 내려갔다)."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            age = self.rates['nav'].age(now)
+            return dict(self.nav) if self.nav is not None and age is not None and age < 2.0 else None
+
+    def on_filtered(self, now: float, x: float, y: float, yaw: float) -> None:
+        with self.lock:
+            self.filtered = (now, x, y, yaw)
+        if self.pose_hook is not None:
+            self.pose_hook(now, x, y, yaw)      # 부스 배치(layout.py)가 로봇 자리를 안다
+
+    def scan_poses(self, now: float) -> tuple[tuple | None, tuple | None]:
+        """스캔 흔적을 쌓을 자세와, 같은 순간의 /odom 자세.
+
+        화면의 로봇은 /odom(바퀴만)으로 그리는데 그쪽은 회전을 덜 재서, 그대로 쌓으면 돌 때마다 벽이 번진다.
+        흔적은 EKF(/odometry/filtered)로 쌓고, 없으면 여기서 다시 적분한 경로(바퀴 거리 + 자이로 방위)로 쌓는다.
+        화면은 두 자세의 차이만큼 흔적 전체를 옮겨 지금 로봇 자리에서 실시간 스캔과 겹치게 한다.
+        """
+        with self.lock:
+            o = self.odom
+            odom = None if o is None else (o['x'], o['y'], o['yaw'])
+            if self.filtered is not None and now - self.filtered[0] < 0.5:
+                return self.filtered[1:], odom
+            if self.fused is not None:
+                return (self.fused['x'], self.fused['y'], self.fused['yaw']), odom
+            return odom, odom
+
+    def markers_alive(self, now: float | None = None) -> bool:
+        """마커 검출 메시지가 오고 있는가(마커가 안 보여도 검출기는 빈 메시지를 계속 낸다)."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            age = self.rates['detections'].age(now)
+            return age is not None and age < 2.0
+
+    def mission(self, now: float | None = None) -> str | None:
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            if self.app is None or now - self.app['time'] > 5.0:
+                return None
+            return MISSION_STATES.get(int(self.app.get('mission_state', 255)), 'unknown')
+
+    def arm_state(self) -> dict | None:
+        with self.lock:
+            return self.arm
+
+    def set_tasks(self, t: dict) -> None:
+        with self.lock:
+            self.tasks = t
 
     def current_trip_id(self) -> str | None:
         with self.lock:
             return (self.app or {}).get('trip_id') or None
+
+    def set_arm(self, a: dict | None) -> None:
+        with self.lock:
+            self.arm = a
 
     def set_ops(self, o: dict) -> None:
         with self.lock:
@@ -417,6 +538,16 @@ class BoothState:
 
             markers_age = None if self._markers_time is None else now - self._markers_time
 
+            lidar = None
+            scan_age = self.rates['scan'].age(now)
+            if self.lidar is not None and scan_age is not None and scan_age < 1.5:
+                near = self.lidar['nearest']
+                lidar = {'n': self.lidar['n'], 'hz': rates['scan'],
+                         'nearest_m': None if near is None else _f(near[0], 2),
+                         'nearest_deg': None if near is None else _f(math.degrees(math.atan2(near[2], near[1])), 0)}
+            nav_age = self.rates['nav'].age(now)
+            nav = None if self.nav is None or nav_age is None or nav_age > 2.0 else self.nav
+
             imu = None
             if self._imu_seen:
                 a_f, a_s = self.acc_fast, self.acc_slow
@@ -481,4 +612,10 @@ class BoothState:
                 'cloud': self.cloud,
                 'pi': self.pi,
                 'ops': self.ops,
+                'arm': self.arm,
+                'lidar': lidar,
+                'nav': nav,
+                # 이동 노드가 쓰는 좌표(EKF)의 로봇 자세. 탑뷰 지도와 배치 패널이 이것으로 그린다
+                'ekf': None if self.filtered is None or now - self.filtered[0] > 1.0 else [_f(self.filtered[1], 3), _f(self.filtered[2], 3), _f(self.filtered[3], 4)],
+                'tasks': self.tasks,
             }

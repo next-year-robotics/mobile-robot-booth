@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+import { LidarViz, type LidarMode, type ScanHeader } from './lidar';
 import type { Hello, State } from './types';
 import { C, el, fmt } from './ui';
 
@@ -113,8 +114,10 @@ class MarkerViz {
     parent.add(this.group, this.ground, this.ray, this.drop, this.distLabel);
   }
 
-  setId(id: number, target: boolean) {
-    if (id !== this.id) {
+  name = '';
+  setId(id: number, target: boolean, name = '') {
+    if (id !== this.id || name !== this.name) {
+      this.name = name;
       this.id = id;
       this.planeMat.map?.dispose();
       this.planeMat.map = markerTexture(id);
@@ -123,7 +126,7 @@ class MarkerViz {
     const col = target ? C.accent : C.body;
     this.outlineMat.color.set(col); this.rayMat.color.set(col); this.ringMat.color.set(col);
     (this.idLabel.element as HTMLElement).className = 'label3d' + (target ? ' accent' : '');
-    (this.idLabel.element as HTMLElement).textContent = `ID ${id}`;
+    (this.idLabel.element as HTMLElement).textContent = name ? `${name} · ID ${id}` : `ID ${id}`;
   }
 
   setPose(p: THREE.Vector3, q: THREE.Quaternion) {
@@ -175,6 +178,12 @@ export class Twin {
   private meta = el('twin-meta');
   private lastState: State | null = null;
   private lastTrack: { p: THREE.Vector3; q: THREE.Quaternion; id: number } | null = null;
+  private lidar = new LidarViz();
+  private placeName = new Map<number, string>();
+  private goal = new THREE.Group();
+  private home = new THREE.Group();
+  private goalLine!: THREE.Line;
+  private goalLabel = label('', 'accent');
 
   constructor(private onReset: () => void) {
     const r = this.renderer;
@@ -202,6 +211,9 @@ export class Twin {
 
     this.scene.add(this.robot);
     this.buildRobot();
+    this.scene.add(this.lidar.trace);
+    this.robot.add(this.lidar.live);
+    this.buildNav();
 
     this.camera.position.set(-2.4, -1.8, 1.7);
     this.controls = new OrbitControls(this.camera, r.domElement);
@@ -219,6 +231,12 @@ export class Twin {
       else if (e.key === '5') this.setView('orbit');
       else if (e.key === '6') this.setView('top');
       else if (e.key === 'r' || e.key === 'R') this.reset();
+      else if ((e.key === 'f' || e.key === 'F') && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) this.toggleWide();
+      else if (e.key === 'Escape') this.toggleWide(false);
+      else if (e.key === 'l' || e.key === 'L') {
+        const order: LidarMode[] = ['all', 'live', 'off'];
+        this.lidar.setMode(order[(order.indexOf(this.lidar.mode) + 1) % order.length]);
+      }
     });
     new ResizeObserver(() => this.resize()).observe(this.host);
     this.resize();
@@ -330,10 +348,51 @@ export class Twin {
     this.robot.add(l);
   }
 
+  /** 이동 목적지와 돌아올 자리. 이동 노드가 로봇 기준 위치로 알려 주므로 로봇에 붙여 그린다. */
+  private buildNav() {
+    const ring = (r: number, color: string) => new THREE.Mesh(new THREE.RingGeometry(r, r + 0.022, 48),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
+    this.goal.add(ring(0.16, C.accent), ring(0.05, C.accent));
+    this.goalLabel.position.set(0, 0, 0.3);
+    this.goal.add(this.goalLabel);
+    this.home.add(ring(0.12, C.body));
+    const hl = label('돌아올 자리'); hl.position.set(0, -0.2, 0.01); this.home.add(hl);
+    this.goalLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(1, 0, 0)]),
+      new THREE.LineDashedMaterial({ color: C.accent, dashSize: 0.07, gapSize: 0.05, transparent: true, opacity: 0.8 }));
+    this.goalLine.frustumCulled = false;
+    for (const o of [this.goal, this.home, this.goalLine]) { o.visible = false; this.robot.add(o); }
+  }
+
+  private showNav(s: State) {
+    const nav = s.nav, moving = !!nav && !['idle', 'arrived', 'failed', 'cancelled'].includes(nav.state);
+    const g = moving ? nav!.goal : null;
+    this.goal.visible = this.goalLine.visible = !!g;
+    this.lidar.avoid = g;
+    (this.goalLabel.element as HTMLElement).style.display = g ? '' : 'none';
+    if (g) {
+      this.goal.position.set(g[0], g[1], 0.005);
+      const p = this.goalLine.geometry.attributes.position as THREE.BufferAttribute;
+      p.setXYZ(0, 0, 0, 0.006); p.setXYZ(1, g[0], g[1], 0.006); p.needsUpdate = true;
+      this.goalLine.computeLineDistances();
+      const name = s.tasks?.task?.kind === 'home' || nav!.kind === 'pose' ? '돌아갈 곳' : s.tasks?.task?.label ?? '목적지';
+      (this.goalLabel.element as HTMLElement).textContent =
+        `${name}${nav!.dist_m != null ? ` ${fmt(nav!.dist_m, 2)} m` : ''}${nav!.blocked ? ' · 앞이 막힘' : ''}`;
+    }
+    // 돌아올 자리는 떠나 있을 때만(30 cm 넘게) 보인다
+    const h = nav?.home ?? null, away = !!h && Math.hypot(h[0], h[1]) > 0.3;
+    this.home.visible = away;
+    this.home.traverse(o => { if (o instanceof CSS2DObject) (o.element as HTMLElement).style.display = away ? '' : 'none'; });
+    if (h && away) this.home.position.set(h[0], h[1], 0.004);
+  }
+
   onHello(h: Hello) {
     this.camOrigin.set(...h.camera.origin);
     this.markerSize = h.marker_size;
+    if (h.lidar) this.lidar.setOrigin(h.lidar.xy);
+    this.placeName = new Map((h.places ?? []).map(p => [p.marker_id, p.label]));
   }
+
+  onScan(h: ScanHeader, mm: Int16Array) { this.lidar.onScan(h, mm); }
 
   onState(s: State) {
     this.lastState = s;
@@ -355,7 +414,7 @@ export class Twin {
     seen.forEach((m, i) => {
       const viz = this.markers[i];
       const p = new THREE.Vector3(...m.p), q = new THREE.Quaternion(...m.q);
-      viz.setId(m.id, m.id === targetId);
+      viz.setId(m.id, m.id === targetId, this.placeName.get(m.id) ?? '');
       viz.setPose(p, q);
       viz.setOpacity(1);
       if (m.id === targetId) this.lastTrack = { p, q, id: m.id };
@@ -364,7 +423,7 @@ export class Twin {
     const holding = s.marker?.status === 'holding';
     if (holding && this.lastTrack && !seen.some((m) => m.id === targetId) && used < this.markers.length) {
       const viz = this.markers[used++];
-      viz.setId(this.lastTrack.id, true);
+      viz.setId(this.lastTrack.id, true, this.placeName.get(this.lastTrack.id) ?? '');
       viz.setPose(this.lastTrack.p, this.lastTrack.q);
       viz.setOpacity(0.45);
     }
@@ -373,13 +432,20 @@ export class Twin {
       if (viz.opacity > 0) viz.setOpacity(Math.max(0, viz.opacity - 0.12));
     }
     const d = s.odom ? Math.hypot(s.odom.x, s.odom.y) : 0;
-    this.meta.textContent = s.odom
+    this.showNav(s);
+    const scan = s.lidar ? `  라이다 ${s.lidar.n}점 ${fmt(s.lidar.hz, 0)} Hz` : '';
+    this.meta.textContent = (s.odom
       ? `x ${fmt(s.odom.x, 2, true)}  y ${fmt(s.odom.y, 2, true)}  yaw ${fmt((s.odom.yaw * 180) / Math.PI, 0, true)}°  원점에서 ${fmt(d, 2)} m`
-      : '오도메트리 없음';
+      : '오도메트리 없음') + scan;
+  }
+
+  /** 디지털 트윈만 화면 가득 띄운다(F, 다시 누르거나 Esc로 돌아온다). 크기 변화는 ResizeObserver가 따라간다. */
+  toggleWide(on = !document.body.classList.contains('twin-wide')) {
+    document.body.classList.toggle('twin-wide', on);
   }
 
   private reset() {
-    this.odomTrail.clear(); this.fusedTrail.clear();
+    this.odomTrail.clear(); this.fusedTrail.clear(); this.lidar.clearTrace();
     this.onReset();
   }
 
@@ -413,6 +479,7 @@ export class Twin {
     this.fusedMark.position.set(this.fused.x, this.fused.y, 0.008);
     this.fusedMark.rotation.z = this.fused.yaw;
     this.fusedMark.visible = !!this.lastState?.fused;
+    this.lidar.draw();
 
     const focus = new THREE.Vector3(rp.x, rp.y, 0.3);
     const yaw = this.robot.rotation.z;

@@ -12,10 +12,10 @@ const TRACKING_KO: Record<string, string> = {
   unavailable: '추적 불가', searching: '찾는 중', following: '따라가는 중', lost: '놓침', error: '오류',
   idle: '추적 안 함', unknown: '알 수 없음',
 };
-const MUX_KO: Record<string, string> = { teleop: '수동 패드', align: '정렬', follow: '추종' };
+const MUX_KO: Record<string, string> = { teleop: '수동 패드', align: '장소 이동', follow: '추종' };
 // Pi systemd 유닛 mr-booth@이름 (config/booth.yaml stack.units)
 const STACK_KO: Record<string, string> = {
-  follow: '주행', phone_bridge: '폰 브리지', mission: '임무', telemetry: '텔레메트리', pad: '패드 버튼',
+  follow: '주행', phone_bridge: '폰 브리지', mission: '임무', telemetry: '텔레메트리', pad: '패드 버튼', nav: '장소 이동',
 };
 const EVENT_KO: Record<string, string> = {
   'agent.online': '텔레메트리 시작', 'agent.offline': '텔레메트리 종료', 'link.connected': '앱 연결',

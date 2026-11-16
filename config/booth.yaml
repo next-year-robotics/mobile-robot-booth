@@ -16,6 +16,7 @@ ros:
     base_status: /base/status
     imu: /imu/data_raw            # MCU 원본. /imu/data는 공분산만 채운 사본이다
     odom: /odom
+    odom_filtered: /odometry/filtered   # EKF(바퀴 + 자이로). 라이다 흔적을 쌓는 데만 쓴다
     marker_track: /marker_track
     detections: /aruco_detections
     image: /camera/image_raw/compressed
@@ -27,8 +28,11 @@ ros:
       follow: /cmd_vel_follow
     phone_link: /phone/link_status
     app_status: /robot/app_status
-    joy: /joy                     # 패드가 붙어 있는지만 본다
+    joy: /joy                     # 패드 연결 상태, 버튼과 십자키 입력
     trip_command: /phone/trip_command   # 운영 버튼 출발·멈춤이 여기로 낸다(앱 브리지와 같은 토픽)
+    scan: /scan                   # RPLIDAR C1 (sllidar_ros2, laser_link)
+    nav_command: /nav/command     # 작업 순서기 → Pi robot/errand_nav.py (JSON)
+    nav_status: /nav/status
 
 robot:
   # mr_base/config 유효값. 바퀴 회전각 → 지면 속도 변환에 쓴다.
@@ -70,6 +74,44 @@ imu:
   # mr_description robot_params.yaml imu_xyz_m / imu_rpy_deg (2026-10-31 실측).
   xyz_m: [0.010, -0.160, 0.090]
   rpy_deg: [-1.0, 2.1, 177.5]
+
+lidar:
+  # 3D 화면에 스캔을 겹쳐 그린다. Pi 스택이 라이다를 띄워야 온다(stack.lidar). 안 오면 화면에서 빠질 뿐이다.
+  enabled: true
+  # mr_description robot_params.yaml lidar_xyz_m(base_link 기준) + base_link z 0.050, lidar_rpy_deg (2026-11-10 실측).
+  # 화살표가 앞을 보게 달았고 드라이버가 화살표를 180°로 내서 yaw가 177.5°다.
+  xyz_m: [0.018, -0.004, 0.250]
+  rpy_deg: [0.0, 0.0, 177.5]
+  # 이 안의 점은 로봇 자기 몸으로 보고 버린다. 라이다가 차체 틀 안에 있어 네 기둥이 늘 찍힌다
+  # (2026-11-15 실측: 뒤 (-0.17, ±0.18), 앞 (0.22~0.29, ±0.13~0.20) m). 상자는 base_footprint 기준 [x0, x1, y0, y1].
+  # robot/errand_nav.py의 lidar_self_box_m 기본값과 같아야 한다.
+  self_radius_m: 0.20
+  self_box_m: [-0.25, 0.31, -0.25, 0.25]
+  max_range_m: 8.0
+  # 벽으로 묶는 기준. 이웃 점이 gap_m(멀리서는 거리 × gap_ratio)보다 떨어지면 다른 물체로 끊는다.
+  gap_m: 0.12
+  gap_ratio: 0.06
+  simplify_m: 0.03
+
+nav:
+  # 말로 시키는 이동("책상으로 가", "책상에서 약통 가져와", "돌아와"). Pi의 mr-booth@nav(robot/errand_nav.py)가 몬다.
+  # 지도 없이 마커를 보고 가고, 출발한 자리는 오도메트리로 돌아온다. 앞이 막히면 라이다로 선다.
+  enabled: true
+  # 마커 앞 이 거리(base_footprint 기준)에서 선다. 장소마다 따로 줄 수 있다.
+  standoff_m: 0.6
+  # 접근 감지: 따라가는 중에 따라가는 사람이 아닌 누군가가 차체에 바짝(앞 0.40 m, 옆 0.25 m, 뒤 0.30 m) 붙으면
+  # 서고 "가까이 오셨네요"라고 한다. 좁은 곳에서 벽에 걸려 자꾸 서면 false로 끄고 브링업을 다시 누른다.
+  guard: true
+  # "3번 마커 따라와"로 따라갈 때 유지하는 거리 [m]. 배지(stack.marker_id)는 추종 노드가 1.1 m로 따라간다.
+  follow_range_m: 1.0
+  # "뒤로 조금만", "앞으로 가"처럼 거리를 말하지 않았을 때 가는 거리 [m]와 "돌아 봐"의 각도 [deg]
+  nudge_m: 0.3
+  turn_deg: 90
+  # 장소 = 그곳에 붙여 둔 ArUco 마커(4X4_50, 배지와 같은 크기). 따라갈 배지(stack.marker_id)와 겹치지 않게 번호를 고른다.
+  # label은 화면과 막내의 말에, aliases는 음성 모델이 알아들을 다른 이름으로 쓴다.
+  places:
+    desk: {label: 책상, marker_id: 5, standoff_m: 0.42, aliases: [테이블, 작업대]}
+    door: {label: 현관, marker_id: 6, aliases: [문, 입구]}
 
 battery:
   # 판정은 사용자 아티팩트 "배터리 잔량표"(2026-10-30, claude.ai/artifact/BkUGHXPsNzimrui8qNY4KC)를 따른다.
@@ -122,13 +164,64 @@ stack:
   # 패드 A·대시보드 출발이 앱에 보일 출발지·목적지 (config/places.yaml 키)
   trip_from: place_home
   trip_to: place_senior_center
+  # 전방 카메라(C920)가 꽂힌 곳. laptop이면 run.sh가 ros/front_camera.launch.py(카메라 + ArUco 검출)를
+  # 노트북에서 띄우고 Pi의 follow는 카메라 없이 뜬다. pi면 예전처럼 Pi가 전부 띄운다.
+  front_camera: laptop
+  # Pi follow 스택에 라이다(sllidar_ros2)를 같이 띄운다. 3D 화면의 스캔과 이동 중 장애물 정지에 쓴다.
+  # 꺼도 이동은 된다(장애물을 못 볼 뿐). Pi 전원이 약하면(저전압 이력) 꺼 본다.
+  lidar: true
   # 대시보드가 보여 주는 유닛 순서. mr-booth@NAME
-  units: [follow, phone_bridge, mission, telemetry, pad]
+  units: [follow, phone_bridge, mission, telemetry, pad, nav]
 
-# Offline introduction works independently. Configure a private ElevenLabs Agent for live voice.
+# 로봇팔 데몬(arm/maknae_arm, scripts/arm.sh). 꺼 두면 팔 칸과 심부름 도구가 빠진다.
+arm:
+  enabled: true
+  url: http://127.0.0.1:8091
+  period_s: 0.1
+  # 패드 B(멈춤)를 누르면 바퀴(Pi 쪽)와 함께 팔도 선다. null이면 끈다.
+  lb_button: 6
+  rt_axis: 4                       # BLE Xbox joydev ABS_GAS
+  stop_button: 1
+
+# 아바타 음성 대화. Gemini Live에 브라우저가 직접 붙고, 브리지는 한 번 쓰는 임시 토큰만 발급한다.
+# 자기소개(녹음 파일)와 고정 대사(web/public/avatar/clips)는 인터넷 없이도 나온다.
 live:
   enabled: true
-  provider: elevenlabs
-  agent_id: ''
-  api_key_path: ~/.config/booth_dashboard/elevenlabs_api_key
-  ptt_button: null  # Enable only after measuring the spare X/Y button on the actual controller.
+  provider: gemini
+  model: gemini-3.8-live
+  # 미리 만들어진 목소리 이름. 밝은 여성 목소리 후보: Leda, Aoede, Zephyr, Autonoe, Laomedeia
+  voice: Leda
+  key_env_file: ~/.config/mobile-robot/gemini.env
+  # 대화 대답을 누구 목소리로 낼지의 기본값. 화면의 컨트롤 패널(키 C)에서 바꾸면 그 브라우저에 저장된다.
+  #   gemini  Gemini Live가 바로 말한다 (가장 빠르다)
+  #   hina    Gemini가 한 말을 문장마다 ElevenLabs Hina로 다시 읽힌다 (고정 대사와 같은 목소리, 조금 늦다)
+  chat_voice: gemini
+  tts:
+    key_env_file: ~/.config/mobile-robot/elevenlabs.env
+    model: eleven_v4_turbo
+    voice_id: lhTvHflPVOqgSWyuWQry
+    stability: 0.4
+    similarity_boost: 0.75
+    speed: 1.1
+  # 아무도 말을 걸지 않을 때 이 간격[s]으로 호객 대사를 튼다. 0이면 끈다.
+  attract_s: 0
+  # 패드 Y를 누르고 있는 동안 듣는다. BLE Xbox 패드의 /joy 번호: A 0, B 1, X 3, Y 4, LB 6, RB 7, View 10, Menu 11.
+  ptt_button: 4
+
+# 앞 보기(음성 도구 look_front). "앞에 뭐가 보여?", "나 보여?", "손에 든 거 뭐야?"처럼 물을 때만
+# 전방 카메라(C920) 한 장을 이 모델에 보여 주고 짧은 답을 받아 대화 모델에 넘긴다.
+# 대화 세션(Live)에 사진을 넣지 않는 까닭: Live는 턴마다 세션 문맥 전체를 다시 입력으로 센다. 사진을 넣으면 대화가 끝날 때까지 매 턴 그 값을 낸다.
+look:
+  enabled: true
+  # 2026-11-16 같은 사진 비교(한 장, LOW): 3.5 Flash-Lite 1.2 s · 4 Hydrogen 4.3 s(생각을 끌 수 없어 450토큰쯤 생각한다) · 4 Argon 7~9 s
+  # 가격(100만 토큰, 입력/출력): Flash-Lite 0.30/2.50, Hydrogen 1.50/7.50, Argon 2/10(12-01부터 4/20)
+  model: gemini-3.5-flash-lite
+  # 사진 한 장을 몇 토큰으로 볼지: LOW 약 270 / MEDIUM 약 540 / HIGH 약 1070. MEDIUM은 0.5 s쯤 늦고 조금 더 자세하다
+  media_resolution: MEDIA_RESOLUTION_LOW
+  # Flash-Lite는 minimal까지 내릴 수 있다. Hydrogen·Argon으로 바꾸면 low로 둔다(minimal을 거절한다)
+  thinking_level: minimal
+  # 생각 토큰도 여기에 들어간다. 너무 작으면 생각하다 끊겨 빈 답이 온다
+  max_output_tokens: 800
+  # 이보다 오래된 영상이면 카메라가 끊긴 것으로 보고 거절한다
+  max_age_s: 2.0
+  timeout_s: 12

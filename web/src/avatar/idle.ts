@@ -2,7 +2,7 @@
 export class IdleSchedule {
   private remaining = 10;
   private elapsed = 0;
-  private kind: 'greeting' | 'peace' | null = null;
+  private kind: string | null = null;
   private previous = 'peace';
   constructor(private random = Math.random) {}
   reset() { this.kind = null; this.elapsed = 0; this.remaining = 10 + this.random() * 8; }
@@ -14,10 +14,10 @@ export class IdleSchedule {
     } else {
       this.remaining -= dt;
       if (this.remaining > 0) return null;
-      const available = ['greeting', 'peace'].filter(k => durations[k] > 0);
+      const available = ['greeting', 'peace', 'dance', 'cheer', 'pose'].filter(k => durations[k] > 0);
       const alternatives = available.filter(k => k !== this.previous);
       const choices = alternatives.length ? alternatives : available;
-      const kind = choices[Math.floor(this.random() * choices.length)] as 'greeting' | 'peace' | undefined;
+      const kind = choices[Math.floor(this.random() * choices.length)];
       if (!kind) { this.reset(); return null; }
       this.kind = kind; this.previous = kind; this.elapsed = 0;
     }

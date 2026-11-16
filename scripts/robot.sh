@@ -2,9 +2,10 @@
 # Pi 시연 스택. 부팅하면 systemd(mr-booth.target)가 알아서 띄운다. 이 스크립트는 설치와 손 조작용이다. ssh rpi5로 돈다.
 #
 #   scripts/robot.sh install       robot/ 파일을 Pi ~/booth에 올리고 systemd 유닛을 설치·enable한다(sudo)
+#   scripts/robot.sh ensure        Pi의 파일이 여기와 다르면 install, 같으면 up (scripts/bringup.sh가 쓴다)
 #   scripts/robot.sh up            스택 올리기 (부팅 때는 저절로 뜬다)
 #   scripts/robot.sh down          스택 내리기
-#   scripts/robot.sh restart [NAME]  전부 또는 하나만 (follow, phone_bridge, mission, telemetry, pad)
+#   scripts/robot.sh restart [NAME]  전부 또는 하나만 (follow, phone_bridge, mission, telemetry, pad, nav)
 #   scripts/robot.sh status        유닛 상태, 전원, 최근 경고
 #   scripts/robot.sh places        config/places.yaml을 앱 장소 목록으로 올리고 폰 브리지를 다시 띄운다
 #   scripts/robot.sh log NAME      로그 따라 보기
@@ -19,9 +20,29 @@ CMD="${1:-status}"
 NAME="${2:-}"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=6 "$HOST")
 
+FILES=(stack.sh pad_trip.py errand_nav.py nav_core.py booth.env mr-booth@.service mr-booth.target)
+if [[ $CMD == ensure ]]; then
+  # booth.env는 install이 config/booth.yaml에서 다시 만든다. 같은 방법으로 만들어 Pi 것과 견준다.
+  python3 - "$ROOT/config/booth.yaml" >"$ROOT/robot/booth.env" <<'PY' || exit 1
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
+s = c['stack']
+print('# scripts/robot.sh install이 config/booth.yaml에서 만든다. 여기를 고치지 말 것.')
+print(f"MARKER_ID={int(s['marker_id'])}\nMARKER_SIZE={float(c['aruco']['marker_size_m'])}")
+print(f"TRIP_FROM={s['trip_from']}\nTRIP_TO={s['trip_to']}")
+print(f"FRONT_CAMERA={s.get('front_camera', 'pi')}")
+print(f"LIDAR={'true' if s.get('lidar') else 'false'}")
+print(f"GUARD={'true' if c.get('nav', {}).get('guard', True) else 'false'}")
+PY
+  here=$(cd "$ROOT/robot" && md5sum "${FILES[@]}")
+  there=$("${SSH[@]}" "cd ~/booth 2>/dev/null && md5sum ${FILES[*]} 2>/dev/null") || true
+  if [[ "$here" == "$there" ]]; then echo "Pi 파일이 최신이다. 꺼진 유닛만 올린다."; CMD=up
+  else echo "Pi 파일이 다르다. 새로 올리고 스택을 다시 띄운다."; CMD=install; fi
+fi
+
 case "$CMD" in
 log)
-  exec ssh -t "$HOST" "journalctl -n 60 -f -o cat -u mr-booth@${NAME:?이름: follow, phone_bridge, mission, telemetry, pad}" ;;
+  exec ssh -t "$HOST" "journalctl -n 60 -f -o cat -u mr-booth@${NAME:?이름: follow, phone_bridge, mission, telemetry, pad, nav}" ;;
 install)
   # booth.yaml stack 절·aruco.marker_size_m → booth.env (stack.sh가 읽는다)
   python3 - "$ROOT/config/booth.yaml" >"$ROOT/robot/booth.env" <<'PY' || exit 1
@@ -31,9 +52,12 @@ s = c['stack']
 print('# scripts/robot.sh install이 config/booth.yaml에서 만든다. 여기를 고치지 말 것.')
 print(f"MARKER_ID={int(s['marker_id'])}\nMARKER_SIZE={float(c['aruco']['marker_size_m'])}")
 print(f"TRIP_FROM={s['trip_from']}\nTRIP_TO={s['trip_to']}")
+print(f"FRONT_CAMERA={s.get('front_camera', 'pi')}")
+print(f"LIDAR={'true' if s.get('lidar') else 'false'}")
+print(f"GUARD={'true' if c.get('nav', {}).get('guard', True) else 'false'}")
 PY
   "${SSH[@]}" 'mkdir -p ~/booth' || exit 1
-  scp -q "$ROOT/robot/stack.sh" "$ROOT/robot/pad_trip.py" "$ROOT/robot/booth.env" \
+  scp -q "$ROOT/robot/stack.sh" "$ROOT/robot/pad_trip.py" "$ROOT/robot/errand_nav.py" "$ROOT/robot/nav_core.py" "$ROOT/robot/booth.env" \
     "$ROOT/robot/mr-booth@.service" "$ROOT/robot/mr-booth.target" "$HOST:booth/" || exit 1
   ;;
 places)
@@ -51,7 +75,7 @@ esac
 "${SSH[@]}" 'bash -s' -- "$CMD" "$NAME" <<'REMOTE'
 CMD="$1"; NAME="$2"
 B=~/booth
-UNITS=(follow phone_bridge mission telemetry pad)
+UNITS=(follow phone_bridge mission telemetry pad nav)
 unit() { echo "mr-booth@$1.service"; }
 
 # 예전 방식(setsid + PGID 파일)으로 띄운 스택. 설치할 때 한 번 내린다.
@@ -78,7 +102,7 @@ legacy_down() {
 
 case "$CMD" in
 install)
-  chmod +x "$B/stack.sh" "$B/pad_trip.py"
+  chmod +x "$B/stack.sh" "$B/pad_trip.py" "$B/errand_nav.py"
   legacy_down
   sudo install -m 644 "$B/mr-booth@.service" "$B/mr-booth.target" /etc/systemd/system/
   sudo systemctl daemon-reload
@@ -86,7 +110,10 @@ install)
   sudo systemctl restart mr-booth.target
   echo "설치·enable 끝. 부팅하면 mr-booth.target이 뜬다."
   ;;
-up) sudo systemctl start mr-booth.target ;;
+up)
+  sudo systemctl start mr-booth.target
+  # target이 이미 active면 죽어 있는 유닛은 그대로 남는다. 하나씩 올린다.
+  for s in "${UNITS[@]}"; do systemctl is-active -q "$(unit "$s")" || sudo systemctl restart "$(unit "$s")"; done ;;
 down) sudo systemctl stop mr-booth.target ;;
 restart)
   if [[ -z "$NAME" || "$NAME" == all ]]; then sudo systemctl restart mr-booth.target
@@ -113,6 +140,6 @@ status)
   done
   echo "enabled $(systemctl is-enabled mr-booth.target 2>/dev/null)  throttled $(vcgencmd get_throttled | cut -d= -f2)  $(vcgencmd measure_temp)  load $(cut -d' ' -f1 /proc/loadavg)"
   ;;
-*) echo "install | up | down | restart [NAME] | status | places | log NAME | mcu-reset | poweroff"; exit 2 ;;
+*) echo "install | ensure | up | down | restart [NAME] | status | places | log NAME | mcu-reset | poweroff"; exit 2 ;;
 esac
 REMOTE

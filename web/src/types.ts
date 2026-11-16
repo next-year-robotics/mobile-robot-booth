@@ -50,12 +50,68 @@ export interface State {
     stacks?: Record<string, string> | null;   // mr-booth@이름 → systemctl is-active
   };
   ops: null | { seq: number; text: string; level: 'info' | 'ok' | 'warn'; busy: string | null };
+  arm?: null | Arm;
+  lidar?: null | { n: number; hz: number; nearest_m: number | null; nearest_deg: number | null };
+  nav?: null | Nav;
+  /** 이동 노드가 쓰는 좌표(EKF)의 로봇 자세 [x, y, yaw] */
+  ekf?: null | [number, number, number];
+  tasks?: null | { enabled: boolean; task: TaskInfo | null; events: TaskEvent[]; layout?: null | Layout };
+}
+
+/** Pi 이동 노드(robot/errand_nav.py)의 /nav/status. goal·home은 지금 로봇에서 본 위치 [앞, 왼쪽] m */
+export interface Nav {
+  state: 'idle' | 'searching' | 'approaching' | 'aligning' | 'driving' | 'turning' | 'following' | 'arrived' | 'failed' | 'cancelled';
+  detail: string; id: string; kind: string; marker_id: number | null;
+  blocked: boolean; passing?: boolean; paused?: boolean; lidar: boolean; ahead_m: number | null;
+  goal: [number, number] | null; home: [number, number] | null; dist_m: number | null; visible: number[];
+  /** 접근 감지: 따라가는 중에 누가 바짝 붙어 서 있다. near는 로봇에서 본 그 점 [앞, 왼쪽] m */
+  guard?: { hold: boolean; near: [number, number] | null; enabled?: boolean };
+}
+/** 부스 배치(bridge/booth_bridge/layout.py). pose는 EKF 좌표, rel은 시작 위치 기준 [앞, 왼쪽, 방향] */
+export interface Layout {
+  start: [number, number, number]; start_set: boolean;
+  places: Record<string, { pose: [number, number, number]; rel: [number, number, number]; marker: boolean }>;
+}
+/** 브리지 작업 순서기(bridge/booth_bridge/tasks.py) */
+export interface TaskInfo {
+  id: string; kind: 'goto' | 'fetch_from' | 'home' | 'move' | 'follow_marker'; title: string; state: 'running' | 'done' | 'failed' | 'cancelled';
+  detail: string; place: string | null; label: string | null; object: string; got: string | null; problem: string;
+  step: number; steps: number;
+}
+export interface TaskEvent {
+  seq: number; type: 'go_start' | 'arrived' | 'fetching' | 'return_start' | 'returned' | 'failed' | 'cancelled' | 'move_start' | 'moved' | 'follow_start';
+  task: string; label: string | null; object: string; got: string | null; problem: string; reason?: string; say?: string;
+}
+export interface Place { key: string; label: string; marker_id: number; aliases: string[] }
+
+export interface ArmItem { label: string; u: number; v: number; x: number; y: number; height_m: number; reachable: boolean; box?: number[] }
+export interface ArmEvent { seq: number; type: string; text: string; t: number; reason?: string }
+/** 팔 데몬(arm/maknae_arm __main__.py state)이 보내는 모양 */
+export interface Arm {
+  ok: boolean; fake: boolean; fault: string;
+  joints: Record<string, number>; tip: [number, number, number];
+  torque: boolean; moving: boolean; volt: number; temp_c: number | null; gripper_ma: number;
+  table_z: number; cams: Record<string, { age_s: number | null }>; poses: string[];
+  workspace: [number, number][] | null;
+  errand: {
+    state: 'idle' | 'looking' | 'picking' | 'holding' | 'releasing' | 'moving' | 'teleop' | 'error';
+    since_s: number; object: string; detail: string; target: ArmItem | null;
+    inventory: ArmItem[]; inventory_age_s: number | null; scanning: boolean;
+    motions: string[]; recording: string; events: ArmEvent[];
+  };
 }
 
 export interface Hello {
   type: 'hello'; sim: boolean;
   camera: { origin: [number, number, number]; width: number; height: number; K: number[] };
   marker_size: number; battery_charge_at: number;
+  arm_url?: string | null;
+  /** 앞 보기(전방 카메라 한 장을 Gemini에게 묻기)가 켜져 있는가 */
+  look?: boolean;
+  places?: Place[];
+  nav?: { enabled: boolean; follow_marker_id?: number; nudge_m?: number; turn_deg?: number };
+  lidar?: { z: number; xy: [number, number] };
+  live?: { enabled: boolean; attract_s: number; voice?: string; chat_voice?: string; tts?: boolean };
 }
 
 export interface OverlayMarker { id: number; corners: [number, number][]; axes: [number, number][]; dist: number; }

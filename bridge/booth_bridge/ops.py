@@ -34,12 +34,15 @@ class Ops:
         self.trip_from = cfg['stack']['trip_from']
         self.trip_to = cfg['stack']['trip_to']
         self.busy: str | None = None
+        self.sos_id: str | None = None
         self.seq = 0
         self.lock = threading.Lock()
 
     def handle(self, cmd: str) -> None:
         if cmd in ('start', 'stop'):
             self._trip(cmd)
+        elif cmd in ('sos', 'sos_cancel'):
+            self._sos(cmd == 'sos')
         elif cmd in SSH_OPS:
             with self.lock:
                 if self.busy:
@@ -62,6 +65,22 @@ class Ops:
             self.node.send_trip(start=False, trip_id=trip_id)
             self._report('멈춤 보냄', 'info')
         log.info('%s trip %s', '출발' if cmd == 'start' else '멈춤', trip_id or '-')
+
+    def _sos(self, raise_: bool) -> bool:
+        if self.node is None:
+            self._report('ROS가 없어 SOS를 보낼 수 없음', 'warn')
+            return False
+        if raise_:
+            self.sos_id = new_trip_id()
+        elif self.sos_id is None:
+            self._report('열린 SOS가 없음', 'info')
+            return False
+        ok = self.node.send_sos(raise_=raise_, sos_id=self.sos_id)
+        self._report(('SOS 보냄' if raise_ else 'SOS 해제 보냄') if ok else 'SOS 메시지 타입이 없음', 'warn' if raise_ or not ok else 'info')
+        log.info('SOS %s %s', '요청' if raise_ else '해제', self.sos_id)
+        if not raise_:
+            self.sos_id = None
+        return ok
 
     def _ssh(self, cmd: str) -> None:
         label, remote, timeout = SSH_OPS[cmd]

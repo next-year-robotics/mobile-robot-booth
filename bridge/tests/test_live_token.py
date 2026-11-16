@@ -12,15 +12,15 @@ from booth_bridge.server import BoothServer
 
 @pytest.fixture
 def cfg(tmp_path):
-    key = tmp_path / 'key'
-    key.write_text('test-secret-not-for-browser')
-    return {'enabled': True, 'agent_id': 'agent_test', 'api_key_path': str(key)}
+    key = tmp_path / 'gemini.env'
+    key.write_text('GEMINI_API_KEY=test-secret-not-for-browser\n')
+    return {'enabled': True, 'key_env_file': str(key), 'model': 'gemini-3.8-live', 'voice': 'Leda'}
 
 
 def test_missing_config(cfg):
     assert issue_token({})['error'] == 'disabled'
-    assert issue_token({'enabled': True})['error'] == 'no_agent'
-    cfg['api_key_path'] = '/missing-key'
+    assert issue_token({'enabled': True})['error'] == 'no_key'
+    cfg['key_env_file'] = '/missing-key'
     assert issue_token(cfg)['error'] == 'no_key'
 
 
@@ -28,16 +28,26 @@ def test_request_and_response(cfg, caplog):
     class Response:
         def __enter__(self): return self
         def __exit__(self, *args): pass
-        def read(self, _n): return b'{"signed_url":"wss://api.elevenlabs.io/v1/convai/conversation?token=private"}'
+        def read(self, _n): return b'{"name":"auth_tokens/one-time"}'
     with patch('booth_bridge.live_token.urlopen', return_value=Response()) as request:
         result = issue_token(cfg)
     req = request.call_args.args[0]
-    assert req.get_method() == 'GET'
-    assert 'agent_id=agent_test' in req.full_url
-    assert req.get_header('Xi-api-key') == 'test-secret-not-for-browser'
-    assert result['ok']
+    assert req.get_method() == 'POST'
+    assert req.full_url.endswith('/v1beta/auth_tokens')
+    assert req.get_header('X-goog-api-key') == 'test-secret-not-for-browser'
+    assert json.loads(req.data)['uses'] == 1
+    assert result == {'ok': True, 'token': 'auth_tokens/one-time', 'model': 'gemini-3.8-live', 'voice': 'Leda'}
     assert 'test-secret' not in json.dumps(result)
     assert not caplog.text
+
+
+def test_unexpected_body_is_rejected(cfg):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, _n): return b'{"error":"nope"}'
+    with patch('booth_bridge.live_token.urlopen', return_value=Response()):
+        assert issue_token(cfg) == {'ok': False, 'error': 'invalid_response'}
 
 
 @pytest.mark.parametrize('error, expected', [

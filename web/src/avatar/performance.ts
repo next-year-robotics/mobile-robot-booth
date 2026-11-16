@@ -7,7 +7,7 @@ export const envelope = (t: number, start: number, end: number, fade = 0.35) =>
 
 // Hangul medial vowel -> the five existing VRM mouth shapes.
 const MEDIAL: Vowel[] = ['aa','ee','aa','ee','oh','ee','oh','ee','oh','aa','ee','ee','oh','ou','oh','ee','ih','ou','ih','ih','ih'];
-function vowels(word: string): Vowel[] {
+export function vowels(word: string): Vowel[] {
   const result: Vowel[] = [];
   for (const char of word) {
     const n = char.charCodeAt(0) - 0xac00;

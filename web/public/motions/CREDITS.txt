@@ -1,0 +1,27 @@
+Dance, talk, pickup, walk, reach
+Quaternius, Universal Animation Library (Standard), CC0 1.0
+https://quaternius.com/packs/universalanimationlibrary.html
+Original clips: Dance_Loop, Idle_Talking_Loop, PickUp_Table, Walk_Loop, Interact.
+
+Cheer
+Kay Lousberg, KayKit Character Animations (Free 1.1), CC0 1.0
+https://kaylousberg.com/game-assets/character-animations
+Original clip: Rig_Medium_Simulation / Cheering.
+
+These VRMA files contain animation tracks retargeted for humanoid avatars.
+License: https://creativecommons.org/publicdomain/zero/1.0/
+
+Face poses
+MakeHuman Team, MakeHuman 1.2 base expressions, adapted to Platinum's brow,
+eyelid, gaze, cheek and mouth shapes in face-poses.json. Wink and bashful are
+local combinations of the avatar's own morph targets.
+https://downloads.tuxfamily.org/makehuman/assets/1.2/base/expressions/
+https://github.com/makehumancommunity/makehuman/blob/master/makehuman/license.txt
+Original pose metadata credits (c) 2016 Data Collection AB, Joel Palmius, Jonas Hauquier.
+
+권루트 챌린지 (keonroot-challenge.vrma, keonroot-challenge.mp3)
+Source performance and audio: @keonrootwo, 권루트 챌린지 #L을가져가.
+https://www.tiktok.com/@keonrootwo/video/7683898701013732615
+Both tracks use source seconds 1.60–14.40. The motion was captured at 15 Hz
+using MediaPipe Pose and retargeted to Platinum, with authored fingers for
+the L, fists and final V signs and a planted stance for the selfie close-up.

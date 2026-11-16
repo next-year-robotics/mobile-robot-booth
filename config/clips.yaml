@@ -1,0 +1,102 @@
+# 미리 녹음해 두는 고정 대사. tools/make_clips.py가 web/public/avatar/clips/에 소리 파일과 manifest.json을 만든다.
+# 로봇 상태가 바뀌는 순간(출발, 마커 놓침, 집기 성공 …)에 인터넷·모델 응답을 기다리지 않고 바로 나온다.
+#
+#   say   실제로 읽을 문장. 화면 자막으로도 쓴다.
+#   tone     말투(영어 한 단어). ElevenLabs v3/v4는 문장 앞 [태그]로, Gemini TTS는 'Say <tone>: 문장' 꼴로 들어간다.
+#   tone_ko  말투(한국어). Gemini Live로 읽힐 때 쓴다.
+# 같은 키에 여러 개를 두면 틀 때마다 하나를 고른다.
+
+voice:
+  # 실시간 대화(config/booth.yaml live)와 같은 모델·목소리로 읽힌다. 기본값.
+  live: {model: gemini-3.8-live, voice: Leda}
+  gemini: {model: gemini-3.8-flash-tts, voice: Leda}
+  # Hina(라이브러리 목소리)는 유료 요금제에서만 API로 쓸 수 있다
+  elevenlabs: {model: eleven_v4, voice_id: lhTvHflPVOqgSWyuWQry, stability: 0.4, similarity_boost: 0.75, speed: 1.1}
+
+# 목소리 지시. live는 한국어(style_ko), Gemini TTS는 영어 부사구(style)를 쓴다.
+style_ko: 밝고 싹싹한 막내. 귀엽고 다정하게, 또박또박 조금 빠르게.
+style: in a bright, cute and friendly young voice, at a slightly fast pace
+
+clips:
+  greet:
+    - {say: "안녕하세요! 저는 막내예요.", tone: cheerfully, tone_ko: 밝고 명랑하게}
+    - {say: "어서 오세요! 막내한테 말 걸어 주세요.", tone: excited, tone_ko: 신나서}
+  attract:
+    - {say: "저한테 심부름 한번 시켜 보실래요?", tone: playfully, tone_ko: 장난스럽게}
+    - {say: "막내야, 하고 불러 주세요. 물건도 가져다 드려요.", tone: cheerfully, tone_ko: 밝고 명랑하게}
+    - {say: "저는 어르신 곁에서 심부름하는 로봇, 막내예요. 구경하고 가세요!", tone: cheerfully, tone_ko: 밝고 명랑하게}
+    - {say: "헤헤, 저 로봇팔도 있어요. 보여 드릴까요?", tone: giggles, tone_ko: 헤헤 웃으며}
+  follow_start:
+    - {say: "네! 따라갈게요. 천천히 가세요.", tone: cheerfully, tone_ko: 밝고 명랑하게}
+    - {say: "같이 가요! 제가 뒤에서 따라갈게요.", tone: happily, tone_ko: 기쁘게}
+  follow_stop:
+    - {say: "여기서 멈출게요.", tone: calmly, tone_ko: 차분하게}
+  passing:
+    - {say: "지나갈게요, 조심하세요!", tone: politely, tone_ko: 공손하고 또렷하게}
+    - {say: "잠시만요, 막내 지나갑니다!", tone: playfully, tone_ko: 장난스럽게}
+  wait_close:
+    - {say: "가까이 오셨네요. 잠깐 멈출게요.", tone: gently, tone_ko: 다정하게}
+  marker_lost:
+    - {say: "어, 어디 계세요? 안 보여요.", tone: worried, tone_ko: 걱정스럽게}
+    - {say: "잠깐만요, 놓쳤어요. 배지를 보여 주세요.", tone: worried, tone_ko: 걱정스럽게}
+  marker_found:
+    - {say: "찾았다! 다시 따라갈게요.", tone: relieved, tone_ko: 안도하며 반갑게}
+  looking:
+    - {say: "네, 찾아볼게요.", tone: cheerfully, tone_ko: 밝고 명랑하게}
+    - {say: "잠시만요, 어디 있나 볼게요.", tone: thoughtful, tone_ko: 생각하듯이}
+  picking:
+    - {say: "찾았어요. 집어 올게요.", tone: happily, tone_ko: 기쁘게}
+  holding:
+    - {say: "여기 가져왔어요. '줘' 하시면 놓아 드릴게요.", tone: cheerfully, tone_ko: 밝고 명랑하게}
+  released:
+    - {say: "여기요! 맛있게 드세요.", tone: happily, tone_ko: 기쁘게}
+    - {say: "네, 여기 있어요.", tone: gently, tone_ko: 다정하게}
+  not_found:
+    - {say: "음, 그건 안 보여요. 다른 걸 말씀해 주시겠어요?", tone: apologetic, tone_ko: 미안해하며}
+  unreachable:
+    - {say: "보이긴 하는데 팔이 안 닿아요. 조금만 가까이 놓아 주세요.", tone: apologetic, tone_ko: 미안해하며}
+  missed:
+    - {say: "앗, 놓쳤어요. 다시 말씀해 주시면 한 번 더 해 볼게요.", tone: embarrassed, tone_ko: 머쓱해하며}
+  failed:
+    - {say: "어, 잠깐만요. 문제가 생겨서 멈췄어요.", tone: worried, tone_ko: 걱정스럽게}
+  stopped:
+    - {say: "네, 멈췄어요.", tone: calmly, tone_ko: 차분하게}
+  motion:
+    - {say: "잘 보세요, 갑니다!", tone: excited, tone_ko: 신나서}
+  sos_sent:
+    - {say: "보호자에게 알렸어요. 제가 곁에 있을게요.", tone: reassuring, tone_ko: 안심시키듯 따뜻하게}
+  battery_low:
+    - {say: "저 배가 고파요. 충전이 필요해요.", tone: tired, tone_ko: 힘없이 귀엽게}
+  # 장소로 가기·다녀오는 심부름(config/booth.yaml nav). 장소 이름은 넣지 않는다(어느 곳이든 같은 대사를 쓴다).
+  # 녹음이 없으면 실시간 대화 모델이 같은 내용을 대신 말한다.
+  nav_go:
+    - {say: "네! 다녀올게요.", tone: "bright and cheerful", tone_ko: 밝고 명랑하게}
+    - {say: "네, 가 볼게요. 잠깐만 기다려 주세요.", tone: "happily, with a smile", tone_ko: 기쁘게}
+  nav_arrived:
+    - {say: "도착했어요!", tone: "bright and cheerful", tone_ko: 밝고 명랑하게}
+  nav_return:
+    - {say: "이제 돌아갈게요.", tone: "upbeat", tone_ko: 차분하게}
+  nav_back:
+    - {say: "다녀왔어요!", tone: "happily, with a smile", tone_ko: 기쁘게}
+  nav_back_empty:
+    - {say: "다녀왔는데, 못 가져왔어요. 죄송해요.", tone: "gently apologetic", tone_ko: 미안해하며}
+  nav_not_found:
+    - {say: "어디로 가야 할지 안 보여요. 표지를 못 찾았어요.", tone: "concerned", tone_ko: 걱정스럽게}
+  nav_blocked_wait:
+    - {say: "앞이 막혔어요. 조금만 비켜 주세요.", tone: "friendly but firm", tone_ko: 공손하고 또렷하게}
+  nav_blocked:
+    - {say: "길이 계속 막혀 있어서 여기서 멈출게요.", tone: "gently apologetic", tone_ko: 미안해하며}
+  nav_failed:
+    - {say: "가다가 문제가 생겨서 멈췄어요.", tone: "concerned", tone_ko: 걱정스럽게}
+  # 따라가는 중에 따라가는 사람이 아닌 누군가가 바짝 다가와 섰을 때. 녹음이 없으면 wait_close를 대신 튼다.
+  guard_close:
+    - {say: "앗, 너무 가까워요! 잠깐 멈출게요. 조금만 떨어져 주세요.", tone: "surprised", tone_ko: 놀라서 다급하게}
+    - {say: "잠시만요, 부딪힐 것 같아요. 한 걸음만 물러나 주세요.", tone: "friendly but firm", tone_ko: 공손하고 또렷하게}
+  # 던지기. 녹음이 없으면 실시간 대화 모델이 대신 말한다.
+  throwing:
+    - {say: "던질게요, 받으세요!", tone: "excited", tone_ko: 신나서}
+    - {say: "갑니다! 하나, 둘, 셋!", tone: "playfully", tone_ko: 장난스럽게}
+  thanks:
+    - {say: "헤헤, 감사합니다!", tone: giggles, tone_ko: 헤헤 웃으며}
+  bye:
+    - {say: "안녕히 가세요! 내년엔 진짜 됩니다!", tone: cheerfully, tone_ko: 밝고 명랑하게}

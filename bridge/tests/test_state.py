@@ -140,3 +140,62 @@ def test_ptt_requires_config_and_releases_on_stale_or_timeout():
     disabled = BoothState({**CFG, 'live': {'ptt_button': None}})
     disabled.on_joy(100, [1] * 16)
     assert disabled.snapshot(100.1)['ptt'] is False
+
+
+def test_pad_buttons_ptt_and_arm_stop():
+    """패드 Y는 누르고 있는 동안 ptt, B는 눌리는 순간 한 번만 팔 멈춤을 부른다."""
+    import inspect
+    import booth_bridge.state as st
+    cfg = make_cfg() if 'make_cfg' in globals() else None
+    if cfg is None:
+        import yaml
+        from pathlib import Path
+        cfg = yaml.safe_load((Path(inspect.getfile(st)).resolve().parents[2] / 'config' / 'booth.yaml').read_text(encoding='utf-8'))
+    cfg['live']['ptt_button'] = 4
+    cfg['arm']['stop_button'] = 1
+    s = st.BoothState(cfg, sim=False)
+    fired = []
+    s.pad_stop_hook = lambda: fired.append(1)
+    up = [0] * 12
+    y = up.copy(); y[4] = 1
+    b = up.copy(); b[1] = 1
+    s.on_joy(1.0, up); assert not s.ptt_down
+    s.on_joy(1.1, y); assert s.ptt_down
+    s.on_joy(1.2, up); assert not s.ptt_down
+    s.on_joy(1.3, b); s.on_joy(1.4, b); s.on_joy(1.5, up); s.on_joy(1.6, b)
+    assert len(fired) == 2
+
+
+def test_dpad_view_presses(st):
+    presses = []
+    st.dpad_hook = presses.append
+    def joy(t, x, y):
+        st.on_joy(t, [], [0] * 6 + [x, y])
+
+    joy(1, 1, 0)  # 연결할 때 이미 누른 방향은 건너뛴다
+    t = 1.0
+    for x, y in [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1)]:
+        joy(t + .1, 0, 0)
+        joy(t + .2, x, y)
+        joy(t + .3, x, y)
+        t += .3
+    joy(5, 0, -1)
+    assert presses == ['left', 'up', 'right', 'down']
+
+
+def test_lb_rt_gripper(st):
+    lb = [0] * 6 + [1]
+
+    def grip(t, rt, buttons=lb):
+        st.on_joy(t, buttons, [0] * 4 + [rt])
+        return st.pad_grip(t)
+
+    assert grip(1, -1, []) is None
+    assert grip(1.1, 1) is None
+    assert grip(1.2, 0.95) == (1, 100)
+    assert grip(1.3, 0) == (1, 53)
+    assert grip(1.4, -1) == (1, 0)
+    assert grip(1.5, 1) == (1, 100)
+    assert grip(1.6, -1, []) is None
+    assert grip(1.7, -1) == (2, 0)
+    assert st.pad_grip(2.3) is None
