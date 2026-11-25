@@ -53,15 +53,25 @@ export interface State {
   arm?: null | Arm;
   lidar?: null | { n: number; hz: number; nearest_m: number | null; nearest_deg: number | null };
   nav?: null | Nav;
+  /** Nav2 전역 경로(/plan, EKF/odom 좌표로 변환된 2D 점열) */
+  plan?: null | NavPlan;
   /** 이동 노드가 쓰는 좌표(EKF)의 로봇 자세 [x, y, yaw] */
   ekf?: null | [number, number, number];
   tasks?: null | { enabled: boolean; task: TaskInfo | null; events: TaskEvent[]; layout?: null | Layout };
+}
+
+export interface NavPlan {
+  pts: [number, number][];
+  len_m: number;
+  frame: string;
+  age_s: number | null;
 }
 
 /** Pi 이동 노드(robot/errand_nav.py)의 /nav/status. goal·home은 지금 로봇에서 본 위치 [앞, 왼쪽] m */
 export interface Nav {
   state: 'idle' | 'searching' | 'approaching' | 'aligning' | 'driving' | 'turning' | 'following' | 'arrived' | 'failed' | 'cancelled';
   detail: string; id: string; kind: string; marker_id: number | null;
+  backend?: string;
   blocked: boolean; passing?: boolean; paused?: boolean; lidar: boolean; ahead_m: number | null;
   goal: [number, number] | null; home: [number, number] | null; dist_m: number | null; visible: number[];
   /** 접근 감지: 따라가는 중에 누가 바짝 붙어 서 있다. near는 로봇에서 본 그 점 [앞, 왼쪽] m */
@@ -74,13 +84,17 @@ export interface Layout {
 }
 /** 브리지 작업 순서기(bridge/booth_bridge/tasks.py) */
 export interface TaskInfo {
-  id: string; kind: 'goto' | 'fetch_from' | 'home' | 'move' | 'follow_marker'; title: string; state: 'running' | 'done' | 'failed' | 'cancelled';
+  id: string; kind: 'goto' | 'fetch_from' | 'home' | 'move' | 'follow_marker' | 'fetch' | 'give'; title: string; state: 'running' | 'done' | 'failed' | 'cancelled';
   detail: string; place: string | null; label: string | null; object: string; got: string | null; problem: string;
   step: number; steps: number;
+  /** 아직 더 가야 한다(집은 물건을 들고 돌아가는 중). "가져왔어요"는 도착해서 말한다 */
+  carry?: boolean;
 }
 export interface TaskEvent {
   seq: number; type: 'go_start' | 'arrived' | 'fetching' | 'return_start' | 'returned' | 'failed' | 'cancelled' | 'move_start' | 'moved' | 'follow_start';
   task: string; label: string | null; object: string; got: string | null; problem: string; reason?: string; say?: string;
+  /** 이 뒤에 건네기가 이어진다 */
+  give?: boolean;
 }
 export interface Place { key: string; label: string; marker_id: number; aliases: string[] }
 
@@ -91,13 +105,15 @@ export interface Arm {
   ok: boolean; fake: boolean; fault: string;
   joints: Record<string, number>; tip: [number, number, number];
   torque: boolean; moving: boolean; volt: number; temp_c: number | null; gripper_ma: number;
-  table_z: number; cams: Record<string, { age_s: number | null }>; poses: string[];
+  table_z: number | null; cams: Record<string, { age_s: number | null }>; poses: string[];
   workspace: [number, number][] | null;
   errand: {
     state: 'idle' | 'looking' | 'picking' | 'holding' | 'releasing' | 'moving' | 'teleop' | 'error';
     since_s: number; object: string; detail: string; target: ArmItem | null;
     inventory: ArmItem[]; inventory_age_s: number | null; scanning: boolean;
     motions: string[]; recording: string; events: ArmEvent[];
+    /** 작업대 높이 [m, 팔 받침 기준]. marker는 마커 실측, vision은 현재 영상 추정, unknown은 미측정 */
+    table?: { z: number | null; source: 'marker' | 'vision' | 'unknown'; spread_m: number | null; marker_id: number | null };
   };
 }
 

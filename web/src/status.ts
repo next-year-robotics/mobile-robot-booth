@@ -12,7 +12,7 @@ const TRACKING_KO: Record<string, string> = {
   unavailable: '추적 불가', searching: '찾는 중', following: '따라가는 중', lost: '놓침', error: '오류',
   idle: '추적 안 함', unknown: '알 수 없음',
 };
-const MUX_KO: Record<string, string> = { teleop: '수동 패드', align: '장소 이동', follow: '추종' };
+const MUX_KO: Record<string, string> = { teleop: '수동 패드', align: '장소 이동', nav: 'Nav2', follow: '추종' };
 // Pi systemd 유닛 mr-booth@이름 (config/booth.yaml stack.units)
 const STACK_KO: Record<string, string> = {
   follow: '주행', phone_bridge: '폰 브리지', mission: '임무', telemetry: '텔레메트리', pad: '패드 버튼', nav: '장소 이동',
@@ -138,7 +138,7 @@ export class StatusView {
         + `<span class="mono">${fmt(b.loop_hz, 0)} Hz${age}</span>`
         + (ovr > 0 ? ` · 루프 초과 ${ovr}` : ''), !b.fresh || ovr > 0);
     } else this.cell('mcu', '데이터 없음');
-    const src = ['teleop', 'align', 'follow'].map((k) =>
+    const src = ['teleop', 'align', 'nav', 'follow'].map((k) =>
       `<span class="mux-src${s.mux.active === k ? ' on' : ''}">${MUX_KO[k]}</span>`).join('');
     // 패드가 붙어 있으면 joy_linux가 30 Hz로 다시 낸다
     const pad = hz(s, 'joy') > 5;

@@ -7,8 +7,8 @@
     {"cmd": "goto_marker", "id": "t3", "marker_id": 5, "standoff_m": 0.6, "align": true}   align: 마커 정면에 선다
     {"cmd": "move", "id": "t6", "dist_m": -0.3, "turn_deg": 0}           곧게 가고(음수면 뒤로) 돈다
     {"cmd": "follow_marker", "id": "t7", "marker_id": 3, "range_m": 1.0}  그 마커를 계속 따라간다
-    {"cmd": "mark_home"}            지금 자리를 돌아올 곳으로 기억한다
-    {"cmd": "goto_home", "id": "t4"}
+    {"cmd": "mark_home"}            지금 자세(자리와 보는 쪽)를 돌아올 곳으로 기억한다. "slot": "trip"이면 그 심부름만의 자리
+    {"cmd": "goto_home", "id": "t4"}  기억한 자리로 가서 그때 보던 쪽으로 돌아선다. "slot"은 위와 같다
     {"cmd": "goto_pose", "id": "t5", "x": 1.0, "y": 0.0, "yaw": 0.0}     오도메트리 좌표
     {"cmd": "cancel"}
 
@@ -82,6 +82,27 @@ class ErrandNav(Node):
         self.guard_enabled = bool(p('guard_enabled', True))
         if not self.guard_enabled:
             cfg.guard_min_points = 1e9          # Navigator 안의 것도 같이 끈다
+        # Nav2 전역 경로 주행 연동(옵션). 켜 두면 goto_pose·goto_home을 Nav2 NavigateToPose(A*+RPP)로
+        # 위임하고, 근접 마커 정렬(goto_marker)·추종(follow_marker)·소이동(move)은 nav_core가 맡는다.
+        self.nav2_enabled = bool(p('nav2_enabled', os.environ.get('NAV2_ENABLED', '0') in ('1', 'true', 'True')))
+        self.nav2_frame = str(p('nav2_frame', 'map'))
+        self._nav2_client = None
+        self._nav2_handle = None
+        self._nav2_state = 'idle'
+        self._nav2_detail = ''
+        self._nav2_goal_id = ''
+        self._nav2_dist: float | None = None
+        self._nav2_goal_xy: tuple[float, float] | None = None
+        if self.nav2_enabled:
+            try:
+                from nav2_msgs.action import NavigateToPose
+                from rclpy.action import ActionClient
+                self._nav2_action_cls = NavigateToPose
+                self._nav2_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+                self.get_logger().info(f'Nav2 전역 주행 모드 활성(frame={self.nav2_frame})')
+            except ImportError:
+                self.get_logger().warning('nav2_msgs가 없어 nav_core 직선 주행으로 동작한다')
+                self.nav2_enabled = False
         self.follow_cmd_at = -1e9
         self.track = None                       # 추종 노드가 따라가는 마커 (x, y, 시각)
         self.scan_pts: list = []
@@ -191,24 +212,113 @@ class ErrandNav(Node):
         if cmd == 'cancel':
             self.cancel('cancel')
         elif cmd == 'mark_home':
-            ok = self.nav.mark_home()
-            self.get_logger().info('돌아올 자리 기억' if ok else '돌아올 자리를 못 잡았다: 오도메트리 없음')
+            slot = str(c.get('slot', 'home'))
+            ok = self.nav.mark_home(slot)
+            self.get_logger().info(f'돌아올 자리 기억({slot}) {self.nav.pose}' if ok else '돌아올 자리를 못 잡았다: 오도메트리 없음')
         elif cmd == 'goto_home':
-            if not self.nav.goto_home(now, goal_id):
+            slot = str(c.get('slot', 'home'))
+            if self.nav2_enabled and self._nav2_client is not None:
+                pose = self.nav.home if slot == 'home' else self.nav.marks.get(slot, self.nav.home)
+                if pose is None:
+                    self.refuse(goal_id, 'no_home')
+                else:
+                    self._send_nav2_pose(goal_id, pose[0], pose[1], pose[2], c.get('frame_id'))
+            elif not self.nav.goto_home(now, goal_id, slot):
                 self.refuse(goal_id, 'no_home')
         elif cmd == 'goto_marker':
+            self._cancel_nav2()
             self.nav.goto_marker(int(c['marker_id']), float(c.get('standoff_m', 0.6)), now, goal_id, bool(c.get('align')))
         elif cmd == 'move':
+            self._cancel_nav2()
             self.nav.move(float(c.get('dist_m', 0.0)), math.radians(float(c.get('turn_deg', 0.0))), now, goal_id)
         elif cmd == 'follow_marker':
+            self._cancel_nav2()
             self.nav.follow_marker(int(c['marker_id']), float(c.get('range_m', 1.0)), now, goal_id)
         elif cmd == 'goto_pose':
             yaw = c.get('yaw')
-            self.nav.goto_pose(float(c['x']), float(c['y']), None if yaw is None else float(yaw), now, goal_id)
+            if self.nav2_enabled and self._nav2_client is not None:
+                self._send_nav2_pose(goal_id, float(c['x']), float(c['y']), None if yaw is None else float(yaw), c.get('frame_id'))
+            else:
+                self.nav.goto_pose(float(c['x']), float(c['y']), None if yaw is None else float(yaw), now, goal_id)
         else:
             return
-        self.get_logger().info(f'명령 {cmd} {goal_id} → {self.nav.state}')
+        self.get_logger().info(f'명령 {cmd} {goal_id} → {self._nav2_state if self._nav2_active() else self.nav.state}')
         self.publish_status()
+
+    def _nav2_active(self) -> bool:
+        return self.nav2_enabled and bool(self._nav2_goal_id) and self._nav2_state != 'idle'
+
+    def _cancel_nav2(self) -> None:
+        if self._nav2_handle is not None:
+            try:
+                self._nav2_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self._nav2_handle = None
+        self._nav2_goal_xy = None
+        if self._nav2_state == 'driving':
+            self._nav2_state, self._nav2_detail = 'cancelled', 'cancel'
+        else:
+            self._nav2_state, self._nav2_detail, self._nav2_goal_id = 'idle', '', ''
+
+    def _send_nav2_pose(self, goal_id: str, x: float, y: float, yaw: float | None, frame_id: str | None = None) -> None:
+        from action_msgs.msg import GoalStatus
+        from geometry_msgs.msg import PoseStamped
+
+        self.nav.cancel('nav2')
+        self._cancel_nav2()
+        if not self._nav2_client.wait_for_server(timeout_sec=1.0):
+            # Nav2 서버가 꺼져 있으면 기존 nav_core 직선 주행으로 안전 폴백한다.
+            self.get_logger().warning('Nav2 서버 미응답 → nav_core 직선 주행으로 폴백')
+            self.nav.goto_pose(x, y, yaw, time.monotonic(), goal_id)
+            return
+
+        gyaw = float(yaw) if yaw is not None else (self.nav.pose[2] if self.nav.pose is not None else 0.0)
+        goal = self._nav2_action_cls.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = str(frame_id or self.nav2_frame)
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = float(x)
+        goal.pose.pose.position.y = float(y)
+        goal.pose.pose.orientation.z = math.sin(0.5 * gyaw)
+        goal.pose.pose.orientation.w = math.cos(0.5 * gyaw)
+
+        self._nav2_goal_id = goal_id
+        self._nav2_state = 'driving'
+        self._nav2_detail = 'nav2'
+        self._nav2_dist = None
+        self._nav2_goal_xy = (float(x), float(y))
+
+        def on_fb(fb):
+            self._nav2_dist = float(fb.feedback.distance_remaining)
+
+        def on_res(fut):
+            if self._nav2_goal_id != goal_id:
+                return
+            res = fut.result()
+            self._nav2_handle = None
+            self._nav2_goal_xy = None
+            if res is None:
+                self._nav2_state, self._nav2_detail = 'failed', 'no_result'
+            elif res.status == GoalStatus.STATUS_SUCCEEDED:
+                self._nav2_state, self._nav2_detail = 'arrived', 'nav2_succeeded'
+            elif res.status == GoalStatus.STATUS_CANCELED:
+                self._nav2_state, self._nav2_detail = 'cancelled', 'nav2_canceled'
+            else:
+                self._nav2_state, self._nav2_detail = 'failed', f'nav2_status_{res.status}'
+            self.publish_status()
+
+        def on_resp(fut):
+            h = fut.result()
+            if h is None or not h.accepted:
+                if self._nav2_goal_id == goal_id:
+                    self._nav2_state, self._nav2_detail = 'failed', 'rejected'
+                    self.publish_status()
+                return
+            self._nav2_handle = h
+            h.get_result_async().add_done_callback(on_res)
+
+        self._nav2_client.send_goal_async(goal, feedback_callback=on_fb).add_done_callback(on_resp)
 
     def refuse(self, goal_id: str, why: str) -> None:
         from nav_core import Goal
@@ -216,6 +326,7 @@ class ErrandNav(Node):
         self.nav.state, self.nav.detail = 'failed', why
 
     def cancel(self, why: str) -> None:
+        self._cancel_nav2()
         if self.nav.cancel(why):
             self.get_logger().info(f'이동 취소 ({why})')
             self.on_control()
@@ -266,6 +377,23 @@ class ErrandNav(Node):
 
     def publish_status(self) -> None:
         status = self.nav.status(time.monotonic())
+        if self.nav2_enabled:
+            status['backend'] = 'nav2'
+        if self._nav2_active():
+            status['state'] = self._nav2_state
+            status['detail'] = self._nav2_detail
+            status['id'] = self._nav2_goal_id
+            status['kind'] = 'pose'
+            status['backend'] = 'nav2'
+            if self._nav2_goal_xy is not None and self.nav.pose is not None:
+                px, py, th = self.nav.pose
+                dx, dy = self._nav2_goal_xy[0] - px, self._nav2_goal_xy[1] - py
+                c, s = math.cos(th), math.sin(th)
+                status['goal'] = [round(c * dx + s * dy, 3), round(-s * dx + c * dy, 3)]
+                if self._nav2_dist is None:
+                    status['dist_m'] = round(math.hypot(dx, dy), 2)
+            if self._nav2_dist is not None:
+                status['dist_m'] = round(self._nav2_dist, 2)
         if self.holding:
             status['guard'] = {'hold': True, 'near': None if self.guard.near is None else [round(v, 2) for v in self.guard.near]}
         status['guard']['enabled'] = self.guard_enabled

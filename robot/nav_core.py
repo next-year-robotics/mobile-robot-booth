@@ -61,6 +61,7 @@ class NavConfig:
     slow_dist_m: float = 0.80           # 이 안이면 속도를 줄인다
     scan_fresh_s: float = 0.6
     marker_clear_m: float = 0.30        # 목적지 마커 둘레 이 안의 점은 장애물로 안 본다
+    dock_zone_m: float = 0.45           # 가까이 서는 목표에서 standoff + 이 거리 안은 천천히, 기억한 마커 자리로도 마무리한다
     dock_speed_mps: float = 0.06
     passing_gap_m: float = 0.15         # 차체 앞끝 기준
     passing_drop_m: float = 0.08        # 연속 스캔 사이에 갑자기 줄어든 거리
@@ -71,8 +72,16 @@ class NavConfig:
     rear_stop_dist_m: float = 0.20
     # 마커 정면 맞추기(align)
     align_tol_m: float = 0.10           # 법선에서 옆으로 이만큼 안이면 정면으로 본다
+    # 정면 맞추기는 마커 법선 위 이 거리의 지점으로 먼저 간다(standoff가 더 멀면 그 거리). 거기서 마커를 보고 곧게 들어간다.
+    # standoff 지점으로 바로 가면, 가까이 서는 책상(0.42 m)에서는 비스듬히 닿는 순간 차체 앞 모서리가 책상에 붙는다
+    # (36° 비스듬하면 틈 3 cm). 2026-11-16 시뮬레이션에서 그 자리에 막혀 선 채 끝났다.
+    align_dist_m: float = 0.80
     align_tries: float = 3              # 이만큼 다시 맞춰 보고 안 되면 마커를 보고 선 것으로 끝낸다
     normal_face_cos: float = 0.25       # 법선이 로봇 쪽을 이만큼도 안 보면 버린다(평면 마커의 뒤집힘)
+    # 좌표로 가기(돌아오기): 책상에 바짝 붙어 선 채로 돌면 차체 모서리(반경 0.39 m)가 책상을 긁는다.
+    # 크게 돌아야 하는데 앞이 이보다 가까우면 먼저 곧게 물러난다(뒤가 막혀 있으면 물러나지 않는다). 0이면 끈다
+    backoff_gap_m: float = 0.20
+    backoff_max_m: float = 0.30
     # 곧게 가기·돌기(move)
     move_tol_m: float = 0.02
     move_max_m: float = 1.5
@@ -211,6 +220,7 @@ class Navigator:
         self.state = 'idle'
         self.detail = ''
         self.home: tuple[float, float, float] | None = None
+        self.marks: dict[str, tuple[float, float, float]] = {}      # 이름 붙여 기억한 자세('trip': 다녀오는 심부름을 시킨 자리)
         self.v = self.w = 0.0
         self.blocked = False
         self._blocked_since: float | None = None
@@ -230,6 +240,7 @@ class Navigator:
         self._turned = 0.0
         self._last_th: float | None = None
         self._straight_done = False
+        self._backoff: tuple[float, float] | bool | None = None     # 물러나기 시작한 자리. None: 아직 안 정했다, False: 안 한다
 
     # ------------------------------------------------------------ 입력
     def set_odom(self, x: float, y: float, yaw: float) -> None:
@@ -299,16 +310,22 @@ class Navigator:
         seen = self.markers.get(int(marker_id))
         self.state = 'following' if seen and now - seen[2] < self.cfg.fresh_s else 'searching'
 
-    def mark_home(self) -> bool:
+    def mark_home(self, slot: str = 'home') -> bool:
+        """지금 자세(자리와 보는 쪽)를 기억한다. 'home'은 "돌아와"가 가는 곳, 다른 이름은 그 일만의 돌아올 곳이다."""
         if self.pose is None:
             return False
-        self.home = self.pose
+        if slot == 'home':
+            self.home = self.pose
+        else:
+            self.marks[slot] = self.pose
         return True
 
-    def goto_home(self, now: float, goal_id: str = '') -> bool:
-        if self.home is None:
+    def goto_home(self, now: float, goal_id: str = '', slot: str = 'home') -> bool:
+        """기억한 자리로 가서 그때 보던 쪽으로 돌아선다."""
+        pose = self.home if slot == 'home' else self.marks.get(slot, self.home)
+        if pose is None:
             return False
-        self.goto_pose(*self.home, now, goal_id)
+        self.goto_pose(*pose, now, goal_id)
         return True
 
     def cancel(self, why: str = '') -> bool:
@@ -330,6 +347,7 @@ class Navigator:
         self._align_count = 0
         self._turned = 0.0
         self._straight_done = False
+        self._backoff = None
         self.guard.reset()
 
     def _finish(self, state: str, detail: str = '') -> None:
@@ -377,7 +395,7 @@ class Navigator:
         elif g.kind == 'follow':
             v, w = self._follow(now, dt)
         else:
-            v, w = self._pose()
+            v, w = self._pose(now)
         if not self.active:
             return 0.0, 0.0
 
@@ -397,8 +415,8 @@ class Navigator:
             # 0.3 m뿐이라, 평소 정지 거리를 그대로 쓰면 목적지 자체에 막힌다.
             stop = min(c.stop_dist_m, self._remaining() + c.goal_margin_m)
             seen = self.markers.get(g.marker_id)
-            if (self._close_marker_goal() and seen is not None and now - seen[2] < c.fresh_s
-                    and self._to_base(seen[0], seen[1])[0] <= g.standoff_m + 0.45):
+            if (self._close_marker_goal() and seen is not None and now - seen[2] < c.memory_s
+                    and self._to_base(seen[0], seen[1])[0] <= g.standoff_m + c.dock_zone_m):
                 v = min(v, c.dock_speed_mps)
                 stop = c.goal_margin_m + c.dock_speed_mps * c.scan_fresh_s
             if self._passing:
@@ -456,9 +474,7 @@ class Navigator:
         # 정면 맞추기: 마커 법선 위의 standoff 지점으로 먼저 간다. 가는 동안 마커가 화면 밖으로 나가도 기억한 자리로 간다.
         lat = self._lateral(now) if g.align else None
         if lat is not None and seen is not None and age < c.memory_s:
-            n = self.normals[g.marker_id][0]
-            px, py = seen[0] + g.standoff_m * math.cos(n), seen[1] + g.standoff_m * math.sin(n)
-            dist, to_p = self._to_base(px, py)
+            dist, to_p = self._to_base(*self._align_point())
             if not self._aligning and abs(lat) > c.align_tol_m and self._align_count < c.align_tries:
                 self._aligning = True
                 self._align_count += 1
@@ -472,7 +488,13 @@ class Navigator:
                         return 0.0, self._turn(to_p)
                     return min(c.max_linear_mps, max(0.04, c.k_linear * dist)), self._turn(to_p)
             self.state = 'approaching'
-        if age is None or age > c.lost_s:
+        # 가까이 서는 목표(책상)의 마지막 구간에서는 마커가 카메라 코앞이라 화면 밖으로 잘 나간다(카메라에서 17 cm).
+        # 거기서 "놓쳤다"고 책상 옆에서 한 바퀴 돌며 찾으면 모서리가 긁히고, 끝내 못 찾았다고 끝난다(2026-11-16 시뮬레이션).
+        # 책상은 움직이지 않으니 그 구간에서는 기억한 자리(memory_s 안)로 마무리한다. 앞은 여전히 라이다가 본다.
+        docking = (self._close_marker_goal() and seen is not None and age < c.memory_s and not self._aligning
+                   and self._to_base(seen[0], seen[1])[0] <= g.standoff_m + c.dock_zone_m)
+        lost_s, fresh_s = (c.memory_s, c.memory_s) if docking else (c.lost_s, c.fresh_s)
+        if age is None or age > lost_s:
             # 가다가 놓쳤다. 마지막으로 본 쪽으로 돌며 다시 찾는다.
             if seen is not None:
                 _, bearing = self._to_base(seen[0], seen[1])
@@ -484,7 +506,7 @@ class Navigator:
         ok = abs(err) < c.range_tol_m and abs(bearing) < c.bearing_tol_rad
         if ok and lat is not None and abs(lat) > c.align_tol_m and self._align_count < c.align_tries:
             ok = False                           # 거리와 방향은 맞지만 비스듬히 서 있다. 다음 주기에 다시 맞춘다
-        if ok and age < c.fresh_s:
+        if ok and age < fresh_s:
             self._settled_since = self._settled_since or now
             if now - self._settled_since >= c.settle_s:
                 self._finish('arrived')
@@ -496,6 +518,13 @@ class Navigator:
         v = 0.0 if abs(err) < c.range_tol_m * 0.6 else max(-c.max_reverse_mps, min(c.max_linear_mps, c.k_linear * err))
         w = 0.0 if abs(bearing) < c.bearing_tol_rad * 0.5 else self._turn(bearing)
         return v, w
+
+    def _align_point(self) -> tuple[float, float]:
+        """정면 맞추기에서 먼저 갈 지점(odom): 마커 법선 위, 마커에서 max(standoff, align_dist_m)."""
+        g = self.goal
+        seen, n = self.markers[g.marker_id], self.normals[g.marker_id][0]
+        d = max(g.standoff_m, self.cfg.align_dist_m)
+        return seen[0] + d * math.cos(n), seen[1] + d * math.sin(n)
 
     def _lateral(self, now: float) -> float | None:
         """마커 법선에서 옆으로 벗어난 거리 [m]. 법선을 모르면 None."""
@@ -564,7 +593,7 @@ class Navigator:
         return v, w
 
     # ------------------------------------------------------------ 좌표로
-    def _pose(self) -> tuple[float, float]:
+    def _pose(self, now: float) -> tuple[float, float]:
         c, g = self.cfg, self.goal
         x, y, th = self.pose
         dist = math.hypot(g.x - x, g.y - y)
@@ -572,18 +601,36 @@ class Navigator:
             self._final = True
         elif self._final and dist > 3 * c.pos_tol_m:
             self._final = False                  # 밀려났다. 다시 간다
+            self._settled_since = None
         if self._final:
             self.state = 'turning'
             if g.yaw is None:
                 self._finish('arrived')
                 return 0.0, 0.0
+            # 떠날 때 보던 쪽으로 돌아선다. 멈춘 뒤 관성으로 더 돌 수 있어서, 선 채로 settle_s 동안 허용오차 안에
+            # 머무는 것을 보고 끝낸다. 그사이 벗어났으면 한 번 더 맞춘다.
             err = wrap(g.yaw - th)
-            if abs(err) < c.yaw_tol_rad:
-                self._finish('arrived')
+            if abs(err) < c.yaw_tol_rad or (self._settled_since is not None and abs(err) < 1.5 * c.yaw_tol_rad):
+                self._settled_since = self._settled_since or now
+                if now - self._settled_since >= c.settle_s:
+                    self._finish('arrived')
                 return 0.0, 0.0
+            self._settled_since = None
             return 0.0, self._turn(err)
         self.state = 'driving'
         err = wrap(math.atan2(g.y - y, g.x - x) - th)
+        if self._backoff is None:
+            ahead = self._clearance(now)
+            close = c.backoff_gap_m > 0 and ahead is not None and ahead < c.backoff_gap_m
+            self._backoff = (x, y) if close and abs(err) > c.turn_first_rad else False
+        if self._backoff:
+            ahead, rear = self._clearance(now), self._clearance_rear(now)
+            gone = math.hypot(x - self._backoff[0], y - self._backoff[1])
+            if (gone >= c.backoff_max_m or ahead is None or ahead >= c.backoff_gap_m
+                    or (rear is not None and rear < c.rear_stop_dist_m + 0.05)):
+                self._backoff = False
+            else:
+                return -c.max_reverse_mps, 0.0
         if abs(err) > c.turn_first_rad:
             return 0.0, self._turn(err)
         return min(c.max_linear_mps, max(0.04, c.k_linear * dist)), self._turn(err)
@@ -594,10 +641,7 @@ class Navigator:
         if g.kind == 'pose':
             return math.hypot(g.x - self.pose[0], g.y - self.pose[1])
         if self._aligning and self._close_marker_goal():
-            seen = self.markers[g.marker_id]
-            n = self.normals[g.marker_id][0]
-            return self._to_base(seen[0] + g.standoff_m * math.cos(n),
-                                 seen[1] + g.standoff_m * math.sin(n))[0]
+            return self._to_base(*self._align_point())[0]
         if g.kind in ('move', 'follow') or self._aligning:
             return math.inf                      # 목적지에 물체가 있는 것이 아니다. 평소 정지 거리를 그대로 쓴다
         seen = self.markers.get(g.marker_id)

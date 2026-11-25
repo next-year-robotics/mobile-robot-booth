@@ -18,6 +18,7 @@ class World:
         self.nav = Navigator()
         self.marker = marker                  # (id, x, y[, 바깥 법선 yaw]) odom
         self.obstacles = list(obstacles)      # odom 점
+        self.min_see = 0.0                    # 이보다 가까우면 마커가 화면 밖으로 나가 안 보인다
         self.nav.set_odom(0.0, 0.0, 0.0)
 
     def base(self, ox, oy):
@@ -31,7 +32,7 @@ class World:
             self.nav.set_odom(self.x, self.y, self.th)
             if self.marker:
                 bx, by = self.base(*self.marker[1:3])
-                if bx > 0.2 and abs(math.atan2(by, bx - 0.25)) < 0.55:      # 카메라 화각 안
+                if bx > max(0.2, self.min_see) and abs(math.atan2(by, bx - 0.25)) < 0.55:      # 카메라 화각 안
                     normal = None if len(self.marker) < 4 else self.marker[3] - self.th
                     self.nav.see_marker(self.marker[0], bx, by, self.t, normal)
             if scan:
@@ -370,3 +371,103 @@ def test_turn_command_does_not_count_rotation_done_by_joystick():
         w.nav.step(w.t, paused=True)
     start = w.th
     assert w.run(20) == 'arrived' and abs((w.th - start) - math.pi / 2) < 0.15
+
+
+def test_trip_slot_returns_to_where_it_was_told_and_keeps_home():
+    # "돌아와"의 자리(home)는 원점. 그 뒤 돌아선 자세에서 다녀오는 심부름을 시켰다: 돌아선 그 자세로 돌아온다
+    w = World(marker=(5, 0.3, 2.2))
+    assert w.nav.mark_home()
+    w.nav.move(0.0, math.radians(90), w.t)
+    assert w.run(20) == 'arrived'
+    told = (w.x, w.y, w.th)
+    assert w.nav.mark_home('trip') and w.nav.home == (0.0, 0.0, 0.0)
+    w.nav.goto_marker(5, 0.6, w.t)
+    assert w.run(40) == 'arrived'
+    assert w.nav.goto_home(w.t, 'back', 'trip')
+    assert w.run(60) == 'arrived'
+    assert math.hypot(w.x - told[0], w.y - told[1]) < 0.08
+    assert abs(math.atan2(math.sin(w.th - told[2]), math.cos(w.th - told[2]))) < 0.1       # 떠날 때 보던 쪽
+    assert w.nav.goto_home(w.t, 'h') and w.run(40) == 'arrived' and abs(math.atan2(math.sin(w.th), math.cos(w.th))) < 0.1
+
+
+def test_unknown_slot_falls_back_to_home():
+    w = World()
+    w.nav.mark_home()
+    assert w.nav.goto_home(w.t, 'x', 'trip')
+
+
+def test_final_heading_is_corrected_after_coasting_past_it():
+    # 실물은 0을 보낸 뒤에도 조금 더 돈다. 허용오차를 벗어나 섰으면 다시 맞추고 끝낸다
+    w = World()
+    w.nav.mark_home()
+    w.th = 2.6
+    w.nav.goto_home(w.t, 'b')
+    coasted = False
+    for _ in range(600):
+        w.t += DT
+        w.nav.set_odom(w.x, w.y, w.th)
+        v, om = w.nav.step(w.t)
+        w.th += om * DT
+        if not coasted and om == 0.0 and w.nav.active:
+            w.th -= 0.15                         # 선 순간 관성으로 8.6° 더 돌았다
+            coasted = True
+        if not w.nav.active:
+            break
+    assert coasted and w.nav.state == 'arrived' and abs(w.th) < 0.1
+
+
+def test_backs_off_from_the_desk_before_turning_around():
+    # 책상(앞 0.12 m)에 붙어 선 채 뒤로 돌아가야 한다. 그대로 돌면 모서리가 책상을 긁는다
+    desk = [(0.42, y / 100) for y in range(-40, 41, 4)]
+    w = World(obstacles=desk)
+    w.nav.goto_pose(-1.5, 0.0, 0.0, w.t)
+    w.run(0.7)
+    assert w.x < -0.03 and abs(w.th) < 0.02                    # 돌기 전에 곧게 물러난다
+    assert w.run(60) == 'arrived' and abs(w.x + 1.5) < 0.08 and abs(math.atan2(math.sin(w.th), math.cos(w.th))) < 0.1
+
+
+def test_no_back_off_when_something_is_behind_or_nothing_is_ahead():
+    w = World(obstacles=[(0.42, 0.0), (-0.40, 0.0), (-0.40, 0.1)])
+    w.nav.goto_pose(0.0, 1.5, None, w.t)
+    w.run(1.0)
+    assert abs(w.x) < 0.02 and w.th > 0.2                      # 뒤가 막혀 있다: 물러나지 않고 돈다
+    w = World()
+    w.nav.goto_pose(-1.5, 0.0, None, w.t)
+    w.run(1.0)
+    assert abs(w.x) < 0.02 and abs(w.th) > 0.2
+
+
+def test_close_desk_is_reached_squarely_from_oblique_starts():
+    # 가까이(0.42 m) 서는 책상. 비스듬히 출발해도 마커 정면 0.8 m 지점을 거쳐 곧게 들어가 정면으로 선다.
+    # 정렬 없이, 또는 0.42 m 지점으로 바로 가면 차체 앞 모서리가 책상에 걸려 blocked로 끝난다
+    desk = [(3.6, 1.0 + i * 0.03) for i in range(41)] + [(3.6 + i * 0.03, y) for i in range(24) for y in (1.0, 2.2)]
+    for start in ((2.69, 0.27, -1.02), (1.68, 0.50, 0.41), (2.6, 2.9, 0.0), (1.0, -0.5, 3.0)):
+        w = World(marker=(5, 3.6, 1.6, math.pi), obstacles=desk)
+        w.x, w.y, w.th = start
+        w.nav.set_odom(*start)
+        w.nav.goto_marker(5, 0.42, w.t, 'a', True)
+        assert w.run(120) == 'arrived', (start, w.nav.detail)
+        assert abs(w.y - 1.6) < 0.06 and abs(math.atan2(math.sin(w.th), math.cos(w.th))) < 0.15, start
+        assert abs((3.6 - w.x) - 0.42) < 0.08
+
+
+def test_docking_finishes_on_the_remembered_marker_when_it_leaves_the_frame():
+    # 카메라 코앞(0.6 m 안)에서는 마커가 화면 밖으로 나간다. 책상 옆에서 돌며 찾지 않고 기억한 자리로 마무리한다
+    desk = [(3.6, 1.0 + i * 0.03) for i in range(41)]
+    w = World(marker=(5, 3.6, 1.6, math.pi), obstacles=desk)
+    w.min_see = 0.6
+    w.x, w.y, w.th = 1.68, 0.50, 0.41
+    w.nav.set_odom(w.x, w.y, w.th)
+    w.nav.goto_marker(5, 0.42, w.t, 'a', True)
+    turned, last = 0.0, w.th
+    for _ in range(120):
+        st = w.run(1.0)
+        turned += abs(w.th - last)
+        last = w.th
+        if st == 'arrived':
+            break
+    assert st == 'arrived' and abs((3.6 - w.x) - 0.42) < 0.08 and abs(w.y - 1.6) < 0.06
+    assert turned < math.pi                     # 한 바퀴 돌며 찾지 않았다
+    # 그 자리에서 다시 시켜도(마커는 여전히 안 보인다) 기억으로 곧 도착한다
+    w.nav.goto_marker(5, 0.42, w.t, 'b', True)
+    assert w.run(10) == 'arrived'

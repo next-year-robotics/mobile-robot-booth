@@ -17,8 +17,9 @@ const PLACES = [{ key: 'desk', label: '책상', marker_id: 5, aliases: ['테이�
 const NAV = { enabled: true, follow_marker_id: 2, nudge_m: 0.3, turn_deg: 90 };
 
 type Call = { name: string; args: Record<string, unknown> };
-interface Case { say: string; want: string; args?: Record<string, unknown>; holding?: string; visible?: number[] }
+interface Case { say: string; want: string; args?: Record<string, unknown>; holding?: string; visible?: number[]; seq?: string[][] }
 // want: 불러야 할 도구. '-'면 로봇을 움직이는 도구를 부르면 안 된다.
+// seq: 여러 동작을 한 문장으로 시켰을 때 받아들일 도구 순서들(그중 하나와 같으면 통과). 순서기가 차례대로 잇는다.
 const CASES: Case[] = [
   { say: '막내야 장기자랑 해줘', want: 'play_talent_show' },
   { say: '막내야 따라와', want: 'follow_me' },
@@ -29,6 +30,14 @@ const CASES: Case[] = [
   { say: '저기 보이는 테이블로 이동해', want: 'go_to_place', args: { place: 'desk' } },
   { say: '현관 쪽으로 가 봐', want: 'go_to_place', args: { place: 'door' } },
   { say: '책상에 가서 귤 좀 가져와', want: 'fetch_from_place', args: { place: 'desk' } },
+  { say: '책상으로 가서 약통 가지고 원래 위치로 돌아와', want: 'fetch_from_place', args: { place: 'desk' }, seq: [['go_to_place', 'fetch_object', 'return_home']] },
+  { say: '테이블 가서 귤 집어 가지고 다시 와', want: 'fetch_from_place', args: { place: 'desk' }, seq: [['go_to_place', 'fetch_object', 'return_home']] },
+  { say: '칠 번 마커로 가서 테이프 가져와', want: 'fetch_from_place', args: { marker_id: 7 }, seq: [['go_to_marker', 'fetch_object', 'return_home']] },
+  { say: '9번 마커 있는 데 가서 귤 가지고 돌아와', want: 'fetch_from_place', args: { marker_id: 9 }, seq: [['go_to_marker', 'fetch_object', 'return_home']] },
+  { say: '책상에서 귤 가져와서 나한테 줘', want: 'fetch_from_place', args: { place: 'desk', hand_over: true }, seq: [['fetch_from_place', 'give_object']] },
+  { say: '책상에 갔다가 다시 돌아와', want: 'go_to_place', seq: [['go_to_place', 'return_home']] },
+  { say: '팔 번 마커 앞에 갔다가 원래 자리로 돌아와', want: 'go_to_marker', seq: [['go_to_marker', 'return_home']] },
+  { say: '뒤로 조금 갔다가 왼쪽으로 돌아', want: 'move_robot', seq: [['move_robot', 'move_robot']] },
   { say: '이제 돌아와', want: 'return_home' },
   { say: '원래 있던 자리로 가', want: 'return_home' },
   { say: '뒤로 쫌만 가', want: 'move_robot', args: { direction: 'back' } },
@@ -121,6 +130,10 @@ function judge(c: Case, calls: Call[]): string {
   const moved = calls.filter(k => MOVERS.has(k.name));
   if (c.want === '-') return moved.length ? `움직이는 도구를 불렀다: ${moved.map(k => k.name).join(', ')}` : '';
   if (!moved.length) return '도구를 부르지 않았다';
+  const names = moved.map(k => k.name).join(' ');
+  if (c.seq?.some(q => q.join(' ') === names)) return '';
+  if (c.seq && moved.length === 1 && moved[0].name === c.want && c.seq.every(q => q.length > 1 && q[0] === c.want) && !c.args)
+    return `첫 동작만 불렀다(${c.seq[0].join(' → ')}이어야 한다)`;
   if (moved.length > 1 || moved[0].name !== c.want) return `다른 도구: ${moved.map(k => `${k.name}(${JSON.stringify(k.args)})`).join(', ')}`;
   for (const [k, v] of Object.entries(c.args ?? {})) {
     const got = moved[0].args[k];

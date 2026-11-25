@@ -84,9 +84,9 @@ def test_unknown_place_and_dead_nav_are_refused_and_new_goal_replaces():
 def test_fetch_from_goes_picks_and_comes_back_with_the_object():
     r = Rig()
     assert r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '약통'}, r.t)['ok']
-    r.tick(5)
+    r.tick(10)
     r.nav['state'] = 'arrived'
-    r.tick(2)
+    r.tick(12)
     wait_fetch_thread(r)
     assert r.arm_sent == [{'cmd': 'fetch', 'name': '약통'}]
     r.tick(3)
@@ -104,9 +104,9 @@ def test_fetch_from_goes_picks_and_comes_back_with_the_object():
 def test_fetch_failure_still_returns_home_and_says_why():
     r = Rig()
     r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '귤'}, r.t)
-    r.tick(5)
+    r.tick(10)
     r.nav['state'] = 'arrived'
-    r.tick(2)
+    r.tick(12)
     wait_fetch_thread(r)
     r.tick()
     r.arm['errand']['events'].append({'seq': 1, 'type': 'not_found', 'text': '귤'})
@@ -253,9 +253,170 @@ def test_new_request_replaces_a_running_move_quietly():
 def test_request_during_pick_is_refused():
     r = Rig()
     r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '귤'}, r.t)
-    r.tick(5)
+    r.tick(10)
     r.nav['state'] = 'arrived'
-    r.tick(2)
+    r.tick(12)
     wait_fetch_thread(r)
     reply = r.tasks.request({'cmd': 'move', 'dist_m': -0.2}, r.t)
     assert not reply['ok'] and '집는 중' in reply['error']
+
+
+# ---------------------------------------------------------------- 여러 동작을 잇기
+def cmds(r):
+    return [c['cmd'] for c in r.sent]
+
+
+def arrive(r, n=3):
+    r.nav['state'] = 'arrived'
+    r.tick(n)
+
+
+def test_calls_from_one_sentence_are_chained_in_order():
+    # "책상으로 가서 약통 집고 돌아와"를 음성 모델이 도구 셋으로 나눠 불렀다. 덮어쓰지 않고 차례대로 한다
+    r = Rig()
+    assert r.tasks.request({'cmd': 'goto', 'place': 'desk', 'turn': 4}, r.t)['ok']
+    assert r.tasks.request({'cmd': 'fetch', 'name': '약통', 'turn': 4}, r.t)['chained']
+    assert r.tasks.request({'cmd': 'home', 'turn': 4}, r.t)['chained']
+    assert r.snap['task']['id'] == 't1' and not r.snap['task']['carry']
+    r.tick(5)
+    assert cmds(r) == ['mark_home', 'goto_marker'] and r.arm_sent == []
+    arrive(r, 12)
+    wait_fetch_thread(r)
+    assert r.arm_sent == [{'cmd': 'fetch', 'name': '약통'}] and cmds(r)[-1] == 'goto_marker'   # 집는 동안 출발하지 않는다
+    assert r.snap['task']['carry']                               # 집어도 "가져왔어요"는 돌아가서 말한다
+    r.arm['errand'].update(state='holding', object='약통')
+    r.tick(2)
+    assert cmds(r)[-1] == 'goto_home' and 'slot' not in r.sent[-1] and r.snap['task']['carry']
+    arrive(r)
+    t = r.snap['task']
+    assert t['state'] == 'done' and t['got'] == '약통' and not t['carry']
+    assert r.events() == ['go_start', 'arrived', 'fetching', 'return_start', 'returned']
+
+
+def test_a_new_sentence_replaces_the_trip_but_same_sentence_does_not():
+    r = Rig()
+    r.tasks.request({'cmd': 'goto', 'place': 'desk', 'turn': 1}, r.t)
+    r.tick(5)
+    assert r.tasks.request({'cmd': 'goto', 'place': 'door', 'turn': 2}, r.t).get('chained') is None
+    assert r.snap['task']['id'] == 't2' and r.snap['task']['place'] == 'door'
+    assert r.tasks.request({'cmd': 'goto', 'place': 'desk', 'turn': 2}, r.t)['chained']       # "현관 갔다가 책상으로 가"
+    assert r.snap['task']['id'] == 't2' and '→' in r.snap['task']['title']
+    assert r.tasks.request({'cmd': 'goto', 'place': 'desk'}, r.t).get('chained') is None       # 화면 버튼(turn 없음)은 바꾼다
+
+
+def test_round_trip_returns_to_where_it_was_told_not_to_an_old_home():
+    # 앞서 말로 돌려 세웠다("왼쪽으로 돌아"): 그때 기억한 자리(home)가 남아 있다. 그 뒤 "책상에서 귤 가져와"는
+    # 시킨 그 자세로 돌아와야 한다(예전에는 돌기 전 방향으로 돌아왔다)
+    r = Rig()
+    r.tasks.request({'cmd': 'move', 'turn_deg': 90}, r.t)
+    r.tick(5)
+    arrive(r)
+    assert cmds(r) == ['mark_home', 'move']
+    r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '귤'}, r.t)
+    r.tick(5)
+    assert r.sent[2] == {'cmd': 'mark_home', 'slot': 'trip'} and cmds(r)[3:] == ['goto_marker']      # home은 다시 기억하지 않는다
+    arrive(r, 12)
+    wait_fetch_thread(r)
+    r.arm['errand'].update(state='holding', object='귤')
+    r.tick(2)
+    assert r.sent[-1]['cmd'] == 'goto_home' and r.sent[-1]['slot'] == 'trip'
+    arrive(r)
+    assert r.snap['task']['state'] == 'done' and r.tasks.away        # "돌아와"의 자리는 아직 따로 있다
+
+
+def test_fetch_from_a_numbered_marker_and_hand_over_on_return():
+    r = Rig()
+    assert r.tasks.request({'cmd': 'fetch_from', 'marker_id': 7, 'name': '귤', 'hand_over': True}, r.t)['ok']
+    r.tick(10)
+    go = r.sent[-1]
+    assert cmds(r) == ['mark_home', 'mark_home', 'goto_marker'] and r.sent[0]['slot'] == 'trip'
+    assert go['marker_id'] == 7 and go['align'] and go['standoff_m'] == 0.42
+    arrive(r, 12)
+    wait_fetch_thread(r)
+    r.arm['errand'].update(state='holding', object='귤')
+    r.tick(2)
+    arrive(r)
+    assert r.snap['events'][-1]['type'] == 'returned' and r.snap['events'][-1]['give']
+    wait_fetch_thread(r)
+    r.tick(2)
+    assert r.arm_sent[-1] == {'cmd': 'give'} and r.snap['task']['state'] == 'running'
+    r.arm['errand'].update(state='idle', object='')
+    r.tick(2)
+    assert r.snap['task']['state'] == 'done' and not r.tasks.away
+
+
+def test_give_asked_on_the_way_back_waits_until_arrival():
+    r = Rig()
+    r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '귤', 'turn': 1}, r.t)
+    r.tick(10)
+    arrive(r, 12)
+    wait_fetch_thread(r)
+    assert not r.tasks.request({'cmd': 'goto', 'place': 'door', 'turn': 2}, r.t)['ok']         # 집는 중에는 바꾸지 못한다
+    r.arm['errand'].update(state='holding', object='귤')
+    r.tick(2)
+    assert r.tasks.request({'cmd': 'give', 'turn': 2}, r.t)['chained']                          # 돌아오는 길에 "줘"
+    assert r.tasks.request({'cmd': 'give', 'turn': 2}, r.t)['chained']
+    assert r.arm_sent == [{'cmd': 'fetch', 'name': '귤'}]
+    arrive(r)
+    wait_fetch_thread(r)
+    r.tick()
+    assert r.arm_sent.count({'cmd': 'give'}) == 1
+
+
+def test_arm_requests_go_straight_to_the_arm_when_nothing_is_running():
+    r = Rig()
+    assert r.tasks.request({'cmd': 'give'}, r.t) == {'ok': False, 'direct': True, 'error': '하는 일이 없어요.'}
+    assert r.tasks.request({'cmd': 'fetch', 'name': '귤'}, r.t)['direct']
+    r.tasks.request({'cmd': 'follow_marker', 'marker_id': 3}, r.t)
+    assert 'direct' not in r.tasks.request({'cmd': 'fetch', 'name': '귤'}, r.t)
+
+
+def test_pick_here_then_come_back_waits_for_the_arm():
+    # 책상 앞에서 "약통 집어서 돌아와": 팔에는 바로 시켰고(집는 중), 돌아가기는 다 집은 뒤에 출발한다
+    r = Rig()
+    r.nav['home'] = [1.2, 0.0]
+    r.tasks.away = True
+    r.arm['errand'].update(state='looking', object='약통')
+    assert not r.tasks.request({'cmd': 'home', 'turn': 3}, r.t)['ok']
+    assert r.tasks.request({'cmd': 'home', 'turn': 3, 'after_arm': True}, r.t)['ok']
+    r.tick(20)
+    assert r.sent == [] and r.snap['task']['carry']
+    r.arm['errand'].update(state='holding', object='약통')
+    r.tick(2)
+    assert cmds(r) == ['goto_home']
+    arrive(r)
+    assert r.snap['task']['got'] == '약통' and r.snap['events'][-1]['got'] == '약통'
+
+
+def test_duplicate_steps_from_one_sentence_are_dropped():
+    r = Rig()
+    r.tasks.request({'cmd': 'goto', 'place': 'desk', 'turn': 1}, r.t)
+    r.tasks.request({'cmd': 'fetch_from', 'place': 'desk', 'name': '귤', 'turn': 1}, r.t)
+    r.tasks.request({'cmd': 'home', 'turn': 1}, r.t)
+    kinds = [s['kind'] for s in r.tasks.steps]
+    assert kinds == ['mark', 'nav', 'settle', 'fetch', 'nav'], kinds
+    assert r.tasks.steps[-1]['cmd'] == {'cmd': 'goto_home'}
+
+
+def test_lost_nav_command_is_sent_once_more():
+    r = Rig()
+    real = r.send
+    dropped = []
+    r.tasks.send_nav = lambda c: (dropped.append(c) or True) if c['cmd'] == 'goto_marker' and not dropped else real(c)
+    r.tasks.request({'cmd': 'goto', 'place': 'desk'}, r.t)
+    r.tick(20)
+    assert len(dropped) == 1 and cmds(r) == ['mark_home', 'goto_marker'] and r.snap['task']['state'] == 'running'
+
+
+def test_reset_discards_steps_and_accepts_next_task():
+    r = Rig()
+    r.tasks.request({'cmd': 'goto', 'place': 'desk'}, r.t)
+    r.tick(5)
+    assert r.tasks.request({'cmd': 'reset'})['ok']
+    assert r.sent[-1] == {'cmd': 'cancel'}
+    assert r.snap['task'] is None and not r.snap['events']
+    count = len(r.sent)
+    r.tick(10)
+    assert len(r.sent) == count
+    assert r.tasks.request({'cmd': 'reset'})['ok']
+    assert r.tasks.request({'cmd': 'goto', 'place': 'desk'}, r.t)['ok']
