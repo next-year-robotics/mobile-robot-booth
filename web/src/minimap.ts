@@ -198,9 +198,27 @@ export class MiniMap {
       text(pl.label, px, py + 26, C.accent, 700);
     }
 
-    // 가는 길
+    // 가는 길 (Nav2 전역 경로 /plan이 있으면 곡선 경로, 없으면 직선 점선)
     const goal = st.goal(), pose = st.pose, task = s?.tasks?.task, running = task?.state === 'running';
-    if (goal && pose) {
+    const planPts = s?.plan?.pts && s.plan.pts.length >= 2 ? s.plan.pts : null;
+    if (planPts) {
+      const end = planPts[planPts.length - 1];
+      const [gx, gy] = P(end[0], end[1]);
+      g.strokeStyle = 'rgba(124, 255, 79, 0.28)'; g.lineWidth = 8; g.lineCap = 'round'; g.lineJoin = 'round';
+      g.beginPath();
+      planPts.forEach(([x, y], i) => { const [px, py] = P(x, y); if (i) g.lineTo(px, py); else g.moveTo(px, py); });
+      g.stroke();
+      g.strokeStyle = s?.nav?.blocked || s?.nav?.guard?.hold ? C.warn : C.accent; g.lineWidth = 3;
+      g.beginPath();
+      planPts.forEach(([x, y], i) => { const [px, py] = P(x, y); if (i) g.lineTo(px, py); else g.moveTo(px, py); });
+      g.stroke();
+      const pulse = 9 + 3 * Math.sin(now / 250);
+      g.strokeStyle = C.accent; g.lineWidth = 2.5; g.beginPath(); g.arc(gx, gy, pulse, 0, Math.PI * 2); g.stroke();
+      g.fillStyle = C.accent; g.beginPath(); g.arc(gx, gy, 3.5, 0, Math.PI * 2); g.fill();
+      const mid = planPts[Math.floor(planPts.length / 2)];
+      const [mx, my] = P(mid[0], mid[1]);
+      text(`Nav2 ${s!.plan!.len_m.toFixed(1)} m`, mx, my - 10, C.accent, 700);
+    } else if (goal && pose) {
       const [rx, ry] = P(pose[0], pose[1]), [gx, gy] = P(goal[0], goal[1]);
       g.strokeStyle = s?.nav?.blocked || s?.nav?.guard?.hold ? C.warn : C.accent; g.lineWidth = 3;
       g.setLineDash([8, 7]); g.lineDashOffset = -(now / 40) % 15;

@@ -156,6 +156,63 @@ test('movement tools pass the request to the bridge, stay silent when a clip spe
   assert.deepEqual(await refused.handlers.return_home({}), { ok: false, error: '이동 노드가 꺼져 있어요.' });
 });
 
+// ---- 여러 동작을 한 문장으로 ----
+function chainTools(taskReply: (m: any) => Record<string, unknown>, state: Partial<State> = {}) {
+  const asked: any[] = [], armed: any[] = [];
+  let turn = 1;
+  const bridge = { task: async (m: any) => { asked.push(m); return taskReply(m); }, send: () => {}, arm: async (m: any) => { armed.push(m); return { ok: true }; } };
+  const s = { arm: { errand: { state: 'idle', object: '', events: [], inventory: [] } }, ...state } as unknown as State;
+  const t = buildTools({ bridge: bridge as never, state: () => s, fresh: () => true, playIntroduction: async () => true,
+    setExpression: () => true, places: () => PLACES, nav: () => ({ enabled: true, follow_marker_id: 2 }), turn: () => turn, hasClip: () => true });
+  return { ...t, asked, armed, next: () => { turn++; } };
+}
+
+test('fetch_from_place takes a marker number or a place and can hand over on return', async () => {
+  const t = chainTools(() => ({ ok: true }));
+  await t.handlers.fetch_from_place({ marker_id: '7번', name: '귤', hand_over: true });
+  assert.deepEqual(t.asked[0], { cmd: 'fetch_from', marker_id: 7, name: '귤', hand_over: true, turn: 1 });
+  await t.handlers.fetch_from_place({ place: 'desk', marker_id: 5, name: '귤' });
+  assert.deepEqual(t.asked[1], { cmd: 'fetch_from', place: 'desk', name: '귤', turn: 1 });
+  assert.equal((await t.handlers.fetch_from_place({ name: '귤' }) as any).ok, false);
+  assert.equal(t.asked.length, 2);
+});
+
+test('pick and hand-over go through the sequencer while a trip runs, and straight to the arm otherwise', async () => {
+  // 가는 중: "가서, 집고, 돌아와"를 도구 셋으로 불렀다. 집기는 팔에 바로 가지 않고 순서기 뒤에 붙는다
+  const busy = chainTools(m => m.cmd === 'goto' ? { ok: true } : { ok: true, chained: true, same_turn: true });
+  await busy.handlers.go_to_place({ place: 'desk' });
+  assert.deepEqual(await busy.handlers.fetch_object({ name: '약통' }), { ok: true, silent: true });
+  assert.deepEqual(await busy.handlers.return_home({}), { ok: true, silent: true });
+  assert.deepEqual(busy.asked.map(m => [m.cmd, m.turn]), [['goto', 1], ['fetch', 1], ['home', 1]]);
+  assert.equal(busy.armed.length, 0);
+  // 돌아오는 길에 따로 "줘"라고 했다: 도착하면 건넨다고 말한다
+  const later = chainTools(() => ({ ok: true, chained: true, same_turn: false }));
+  const r = await later.handlers.give_object({}) as any;
+  assert.equal(r.ok, true); assert.ok(r.note.includes('도착하면')); assert.equal(later.armed.length, 0);
+  // 하는 일이 없다: 팔에 바로 시킨다. 같은 말의 "돌아와"는 팔이 끝난 뒤에 출발한다
+  const idle = chainTools(m => ['fetch', 'give'].includes(m.cmd) ? { ok: false, direct: true } : { ok: true });
+  assert.deepEqual(await idle.handlers.fetch_object({ name: '약통' }), { ok: true, silent: true });
+  assert.deepEqual(idle.armed, [{ cmd: 'fetch', name: '약통' }]);
+  await idle.handlers.return_home({});
+  assert.deepEqual(idle.asked.at(-1), { cmd: 'home', turn: 1, after_arm: true });
+  idle.next();
+  await idle.handlers.return_home({});
+  assert.deepEqual(idle.asked.at(-1), { cmd: 'home', turn: 2 });
+  // 순서기가 거절하면(따라가는 중) 팔에 보내지 않는다
+  const no = chainTools(() => ({ ok: false, error: '따라가는 중이에요.' }));
+  assert.deepEqual(await no.handlers.fetch_object({ name: '귤' }), { ok: false, error: '따라가는 중이에요.' });
+  assert.equal(no.armed.length, 0);
+});
+
+test('the table height marker is not a place to go, and its measurement reaches the model', async () => {
+  const state = { mux: { active: null }, markers3d: [{ id: 10 }, { id: 9 }], arm: { errand: { state: 'idle', object: '', events: [], inventory: [],
+    table: { z: 0.0912, source: 'marker', spread_m: 0.002, marker_id: 10 } } } } as unknown as State;
+  const t = chainTools(() => ({ ok: true }), state);
+  await t.handlers.go_to_marker({});
+  assert.equal(t.asked[0].marker_id, 9);
+  assert.deepEqual((robotStatus(state, true, PLACES) as any).work_table, { source: 'marker', height_cm: 9.1, measured_by_marker: true });
+});
+
 test('status tells the model about the errand, places in view and obstacles', () => {
   const state = { sim: true, mux: { active: null }, markers3d: [{ id: 5 }], lidar: { nearest_m: 0.7 },
     nav: { visible: [6], home: [1.2, 0], blocked: true },

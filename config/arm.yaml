@@ -110,10 +110,32 @@ cameras:
     height: 480
     fourcc: MJPG
     fps: 30
+    v4l2_controls:
+      auto_exposure: 3
+      gain: 32
+      white_balance_automatic: 1
+      power_line_frequency: 2  # 국내 조명 60 Hz
 
 workspace:
   # 작업대 윗면 높이 [m]. 부스 탁자를 놓은 뒤 tools/arm_calib.py table로 잰다.
+  # 수동 동작의 기본 바닥 높이. 자동 집기는 현재 마커 측정 또는 현재 영상의 받침면 추정값을 쓴다.
   table_z_m: 0.0
+  # 작업대 높이 마커. 이 ArUco 마커(4X4_50)를 작업대 위에 눕혀 두면 탑뷰 카메라가 크기로 거리를 재서 작업대 높이를 구한다.
+  # 물건을 찾거나 작업대를 살필 때마다 다시 재고, 물건 찾기 모델에게도 "기준표다, 물건이 아니다"와 거리를 같이 알려 준다.
+  # 모든 작업대에 있을 필요는 없다. 주행용 마커(config/booth.yaml stack.marker_id, nav.places)와 번호가 겹치면 안 된다.
+  table_marker:
+    enabled: true
+    id: 10
+    size_m: 0.08
+    dictionary: 4X4_50
+    thickness_m: 0.0058  # 작업대에서 검은 마커 인쇄면까지의 높이
+    # 판 두께를 뺀 뒤 적용하는 실측 보정값.
+    z_offset_m: 0.0
+    # 이 범위 밖이거나 이보다 기울어 있으면(세워 둔 다른 마커) 버리고 영상으로 추정한다
+    z_range_m: [-0.08, 0.30]
+    max_tilt_deg: 20
+    # 가운데값을 낼 프레임 수. 한 장의 잡음이 5~10 mm라 여러 장을 쓴다
+    frames: 7
   # 집을 수 있는 범위. 밖이면 집지 않고 되묻는다.
   x_m: [0.12, 0.40]
   y_m: [-0.22, 0.22]
@@ -122,8 +144,11 @@ workspace:
   hover_m: 0.09
   # 끝점(고정 집게 끝)을 물건 중심에서 다무는 축 방향으로 이만큼 비켜 내린다. 물건이 두 집게 사이에 온다.
   grasp_shift_m: 0.03
+  # 테이프 벽을 물었을 때 벌림 5.1, 빈손 0.8 (0~100). 들어 올린 뒤에도 다시 확인한다.
+  tape_min_opening: 3.0
   # 집게 끝을 작업대에서 이만큼 띄워 잡는다. 움직이는 집게는 호를 그리며 내려와서, 끝이 낮을수록 넓적한 물건의 옆구리를 문다.
   grasp_clear_m: 0.008
+  retry_deeper_m: 0.003  # 직전 빈손 뒤 같은 위치의 물건을 다시 요청했을 때
 
 vision:
   # zero-shot 물건 찾기. 2026-11-16 가짜 작업대 그림 비교: Hydrogen 찾기 3.9 s · 목록 6.7 s, Argon 8.2 s · 8~14 s, 점 오차는 둘 다 1~2 px.

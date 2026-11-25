@@ -21,11 +21,11 @@ MISSION_STATES = {0: 'idle', 1: 'starting', 2: 'active', 3: 'arrived', 4: 'cance
 TRACKING_STATES = {0: 'unavailable', 1: 'searching', 2: 'following', 3: 'lost', 4: 'error',
                    5: 'idle', 255: 'unknown'}
 # twist_mux.yaml 우선순위 순서. 앞이 이긴다.
-MUX_PRIORITY = ('teleop', 'align', 'follow')
+MUX_PRIORITY = ('teleop', 'align', 'nav', 'follow')
 MUX_TIMEOUT_S = 0.3
 
 RATE_TOPICS = ('joint_states', 'base_status', 'imu', 'odom', 'marker_track', 'detections',
-               'image', 'cmd_vel', 'phone_link', 'app_status', 'joy', 'scan', 'nav')
+               'image', 'cmd_vel', 'phone_link', 'app_status', 'joy', 'scan', 'nav', 'plan')
 
 
 def rpy_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
@@ -127,6 +127,9 @@ class BoothState:
         self.pad_stop_button = cfg.get('arm', {}).get('stop_button')
         self.pad_stop_down = False
         self.pad_stop_hook = None
+        self.menu_down = False
+        self.menu_solo = False
+        self.pad_reset_hook = None
         self.grip_session = 0
         self.grip_value = None
         self.rt_axis = cfg.get('arm', {}).get('rt_axis', 4)
@@ -184,6 +187,7 @@ class BoothState:
         self.filtered: tuple | None = None   # /odometry/filtered (시각, x, y, yaw)
         self.pose_hook = None
         self.nav: dict | None = None      # Pi errand_nav의 /nav/status
+        self.plan: dict | None = None     # Nav2 전역 경로(/plan, EKF/odom 좌표)
         self.tasks: dict | None = None    # 작업 순서기 (tasks.py)
 
     # ---------------------------------------------------------------- 바퀴
@@ -359,6 +363,18 @@ class BoothState:
             stop = type(sb) is int and 0 <= sb < len(buttons) and bool(buttons[sb])
             fire = stop and not self.pad_stop_down and self.pad_stop_hook is not None
             self.pad_stop_down = stop
+            # BLE joydev: View=10, Menu=11. 단독 클릭을 놓을 때만 처리해 종료 조합과 구분한다.
+            valid = len(buttons) > 11
+            menu = valid and bool(buttons[11])
+            fresh = valid and age is not None and age < 0.5
+            if not fresh or (valid and buttons[10]):
+                self.menu_solo = False
+            elif menu and not self.menu_down:
+                self.menu_solo = True
+            reset_hook = self.pad_reset_hook if self.menu_down and not menu and self.menu_solo else None
+            self.menu_down = menu
+            if not menu:
+                self.menu_solo = False
             if age is None or age >= 0.5:
                 self.grip_value = None
             if (stop or not 0 <= self.lb_button < len(buttons) or not buttons[self.lb_button]
@@ -371,6 +387,8 @@ class BoothState:
                     self.grip_session += 1
                 if self.grip_value is not None or travel > 0.01:
                     self.grip_value = round(100 * min(1.0, (1 - travel) / 0.95))
+        if reset_hook:
+            reset_hook()
         if direction and dpad_hook:
             dpad_hook(direction)
         if fire:
@@ -393,6 +411,28 @@ class BoothState:
         with self.lock:
             self.rates['nav'].tick(now)
             self.nav = dict(status)
+
+    def on_plan(self, now: float, pts: list[tuple[float, float]], frame: str = 'odom') -> None:
+        """Nav2 전역 경로(/plan). 전체 길이를 구한 뒤 화면 전송용으로 최대 140점으로 줄여 둔다."""
+        clean = [(float(x), float(y)) for x, y in pts if math.isfinite(x) and math.isfinite(y)]
+        with self.lock:
+            self.rates['plan'].tick(now)
+            if len(clean) < 2:
+                self.plan = None
+                return
+            total = sum(math.hypot(x1 - x0, y1 - y0) for (x0, y0), (x1, y1) in zip(clean, clean[1:]))
+            max_pts = 140
+            if len(clean) > max_pts:
+                step = (len(clean) - 1) / (max_pts - 1)
+                sampled = [clean[int(round(i * step))] for i in range(max_pts - 1)] + [clean[-1]]
+            else:
+                sampled = clean
+            self.plan = {
+                'pts': [[_f(x, 3), _f(y, 3)] for x, y in sampled],
+                'len_m': _f(total, 2),
+                'frame': str(frame),
+                'time': now,
+            }
 
     def nav_status(self, now: float | None = None) -> dict | None:
         """이동 노드가 살아 있으면 마지막 보고. 2 s 넘게 조용하면 None(노드가 내려갔다)."""
@@ -548,6 +588,14 @@ class BoothState:
             nav_age = self.rates['nav'].age(now)
             nav = None if self.nav is None or nav_age is None or nav_age > 2.0 else self.nav
 
+            plan = None
+            if self.plan is not None:
+                plan_age = now - self.plan['time']
+                nav_stopped = nav is not None and nav.get('state') in ('idle', 'arrived', 'failed', 'cancelled')
+                if plan_age < 15.0 and not nav_stopped:
+                    plan = {'pts': self.plan['pts'], 'len_m': self.plan['len_m'],
+                            'frame': self.plan['frame'], 'age_s': _f(plan_age, 2)}
+
             imu = None
             if self._imu_seen:
                 a_f, a_s = self.acc_fast, self.acc_slow
@@ -615,6 +663,7 @@ class BoothState:
                 'arm': self.arm,
                 'lidar': lidar,
                 'nav': nav,
+                'plan': plan,
                 # 이동 노드가 쓰는 좌표(EKF)의 로봇 자세. 탑뷰 지도와 배치 패널이 이것으로 그린다
                 'ekf': None if self.filtered is None or now - self.filtered[0] > 1.0 else [_f(self.filtered[1], 3), _f(self.filtered[2], 3), _f(self.filtered[3], 4)],
                 'tasks': self.tasks,

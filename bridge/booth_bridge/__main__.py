@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import signal
+import threading
 from pathlib import Path
 
 import yaml
@@ -69,7 +70,6 @@ def main() -> None:
         from .arm_link import ArmLink
         arm = ArmLink(cfg['arm'], state, sim=args.sim)
         arm.start()
-        import threading
         state.pad_stop_hook = lambda: threading.Thread(target=arm.command, args=({'cmd': 'stop'},), daemon=True).start()
 
     ops = Ops(cfg, state, node)
@@ -95,6 +95,13 @@ def main() -> None:
         if stop_arm is not None:
             stop_arm()
     state.pad_stop_hook = pad_stop
+
+    def reset_steps() -> None:
+        result = tasks.request({'cmd': 'reset'})
+        if not result.get('ok'):
+            log = logging.getLogger('booth.reset')
+            log.warning('단계 초기화: %s', result.get('error'))
+    state.pad_reset_hook = lambda: threading.Thread(target=reset_steps, name='pad-reset', daemon=True).start()
 
     server = BoothServer(cfg, state, cam, sync, Path(args.static), ops, arm, tasks)
     if node is not None:

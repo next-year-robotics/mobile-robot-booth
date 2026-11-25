@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -33,7 +34,17 @@ class Camera:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.cfg['height']))
         cap.set(cv2.CAP_PROP_FPS, int(self.cfg.get('fps', 30)))
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        return cap if cap.isOpened() else None
+        if not cap.isOpened():
+            return None
+        controls = self.cfg.get('v4l2_controls')
+        if controls:
+            settings = ','.join(f'{key}={value}' for key, value in controls.items())
+            try:
+                subprocess.run(['v4l2-ctl', '-d', dev, '-c', settings], capture_output=True,
+                               text=True, check=True, timeout=3)
+            except (OSError, subprocess.SubprocessError) as e:
+                log.warning('%s 카메라 설정 실패: %s', self.name, getattr(e, 'stderr', None) or e)
+        return cap
 
     def _loop(self) -> None:
         cap = None
@@ -115,3 +126,31 @@ class TopView:
         pc = self.R.T @ (np.asarray(p, float) - self.C)
         uv, _ = cv2.projectPoints(pc.reshape(1, 1, 3), np.zeros(3), np.zeros(3), self.K, self.dist)
         return float(uv[0, 0, 0]), float(uv[0, 0, 1])
+
+    def align_screws(self, frame, templates, centers) -> float:
+        """고정 나사 세 점의 기준 광선과 현재 광선을 맞춘다. 카메라 중심은 고정이다."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if len(centers) != 3 or templates is None or templates.shape != (21, 63):
+            raise ValueError('나사 기준 영상이 없다')
+        points = []
+        for i, (x, y) in enumerate(centers):
+            left, top = max(0, x - 50), max(0, y - 95)
+            roi = gray[top:y + 96, left:x + 51]
+            patch = templates[:, i * 21:(i + 1) * 21]
+            if min(roi.shape) < 21:
+                raise ValueError('나사가 화면 밖에 있다')
+            scores = cv2.matchTemplate(roi, patch, cv2.TM_CCOEFF_NORMED)
+            _, score, _, (u, v) = cv2.minMaxLoc(scores)
+            if score < 0.75:
+                raise ValueError(f'나사 {i + 1} 매칭 불확실 ({score:.2f})')
+            points.append((left + u + 10, top + v + 10))
+        old = np.array([self.ray(*p) for p in centers])
+        new = np.array([self.ray(*p) for p in points])
+        u, _, vt = np.linalg.svd(old.T @ new)
+        delta = u @ np.diag([1, 1, np.linalg.det(u @ vt)]) @ vt
+        angle = float(np.linalg.norm(cv2.Rodrigues(delta)[0]) * 180 / np.pi)
+        residual = np.linalg.norm(new @ delta.T - old, axis=1).max() * max(self.K[0, 0], self.K[1, 1])
+        if residual > 3 or angle > 8:
+            raise ValueError(f'나사 위치 불일치 ({residual:.1f}px, {angle:.1f}도)')
+        self.R = delta @ self.R
+        return angle

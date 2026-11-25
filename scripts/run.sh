@@ -4,16 +4,18 @@
 #   scripts/run.sh                 실제 로봇 (ROS 도메인 0, Pi와 같은 네트워크)
 #   scripts/run.sh --sim           가짜 로봇·가짜 팔(가짜 작업대)까지 노트북에서 띄운다 (도메인 77, 이 노트북 안에서만).
 #                                  로봇 없이 음성 → 집기 → 건네기를 리허설할 때 쓴다
+#   scripts/run.sh --sim --nav2    위 시뮬레이션에 실제 ROS 2 Jazzy SLAM(slam_toolbox) + Nav2(A* · RPP)를 같이 띄운다
 #   scripts/run.sh --peer 10.0.0.5 멀티캐스트가 막힌 네트워크에서 Pi 주소를 직접 알려 준다
 #   scripts/run.sh --no-browser    브라우저는 직접 연다 (http://127.0.0.1:8080)
 #
 # 창은 전체 화면 앱 모드로 뜬다. F11로 빠져나오고 Ctrl+C로 전부 내린다.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SIM=0; PEER=""; BROWSER=1; PORT=8080
+SIM=0; NAV2=0; PEER=""; BROWSER=1; PORT=8080
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sim) SIM=1 ;;
+    --nav2) NAV2=1 ;;
     --peer) PEER="$2"; shift ;;
     --no-browser) BROWSER=0 ;;
     --port) PORT="$2"; shift ;;
@@ -29,6 +31,10 @@ fi
 
 set +u
 source /opt/ros/jazzy/setup.bash
+MOBILE_ROBOT_WS="${MOBILE_ROBOT_WS:-$HOME/dev/mobile-robot/install/setup.bash}"
+if [[ $NAV2 -eq 1 && -f "$MOBILE_ROBOT_WS" ]]; then
+  source "$MOBILE_ROBOT_WS"
+fi
 [[ -f "$ROOT/ros_ws/install/setup.bash" ]] || "$ROOT/scripts/build_msgs.sh"
 source "$ROOT/ros_ws/install/setup.bash"
 set -u
@@ -54,12 +60,22 @@ if [[ $SIM -eq 1 ]]; then
   # 실제 로봇(도메인 0)과 절대 섞이지 않게 도메인도 바꾸고 이 노트북 밖으로 나가지도 않게 한다.
   export ROS_DOMAIN_ID=77
   export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-  python3 "$ROOT/tools/fake_robot.py" &
+  FAKE_ARGS=()
+  NAV_ARGS=()
+  if [[ $NAV2 -eq 1 ]]; then
+    FAKE_ARGS+=(--nav2)
+    NAV_ARGS+=(--ros-args -p nav2_enabled:=true)
+  fi
+  python3 "$ROOT/tools/fake_robot.py" "${FAKE_ARGS[@]}" &
   PIDS+=($!)
   BRIDGE_ARGS+=(--sim)
   # Pi에서 mr-booth@nav로 도는 이동 노드를 여기서 같이 띄운다(가짜 로봇을 실제와 같은 토픽으로 몬다)
-  python3 "$ROOT/robot/errand_nav.py" &
+  python3 "$ROOT/robot/errand_nav.py" "${NAV_ARGS[@]}" &
   PIDS+=($!)
+  if [[ $NAV2 -eq 1 ]]; then
+    ros2 launch mr_bringup nav.launch.py base:=false lidar:=false twist_mux:=false teleop:=false nav_bridge:=false slam:=true &
+    PIDS+=($!)
+  fi
   # 팔 데몬이 꺼져 있을 때만 가짜 팔을 띄우고, 끝나면 내린다. 진짜 팔이 떠 있으면 건드리지 않는다.
   if arm_enabled && ! "$ROOT/scripts/arm.sh" status >/dev/null 2>&1; then
     "$ROOT/scripts/arm.sh" start --fake && FAKE_ARM=1 || true
@@ -87,4 +103,4 @@ if [[ $BROWSER -eq 1 ]]; then
   "$ROOT/scripts/chrome.sh" "http://127.0.0.1:$PORT/" --start-fullscreen >/dev/null 2>&1 &
   PIDS+=($!)
 fi
-if [[ $SIM -eq 1 ]]; then wait "${PIDS[@]:0:3}"; else wait "${PIDS[0]}"; fi
+if [[ $SIM -eq 1 && $NAV2 -eq 1 ]]; then wait "${PIDS[@]:0:4}"; elif [[ $SIM -eq 1 ]]; then wait "${PIDS[@]:0:3}"; else wait "${PIDS[0]}"; fi

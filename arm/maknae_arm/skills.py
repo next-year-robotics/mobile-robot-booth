@@ -18,12 +18,14 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from .cameras import Camera, TopView
 from .dance import Choreography
 from .driver import Arm, ArmError
 from .kin import ARM_JOINTS
+from .table import TableMarker
 from .vision import Argon, VisionError, grasp_axis
 
 log = logging.getLogger('arm.skills')
@@ -46,6 +48,7 @@ class Errand:
         self.cams: dict | None = None               # 튜닝 사진용. __main__이 꽂는다
         self.state = IDLE
         self.since = time.monotonic()
+        self.last_empty: tuple[str, float, float, float] | None = None
         self.object = ''
         self.detail = ''
         self.target: dict | None = None            # 지금 집으려는 물건 (화면 표시용)
@@ -54,12 +57,23 @@ class Errand:
         self.scanning = False
         self.events: list[dict] = []
         self.seq = 0
+        self.reset_lock = threading.Lock()
         self.busy = threading.Lock()               # 팔을 움직이는 작업은 한 번에 하나
         self.motions_dir = Path(cfg['motions_dir']).expanduser()
         self.motions_dir.mkdir(parents=True, exist_ok=True)
         self.recording = ''
         self._leader = None
         self._dance_cut = False                    # 장기자랑을 중간에 끝냈다(멈춤 버튼과 구별)
+        # 작업대 높이: 작업대 위에 높이 마커가 보이면 그것으로 재고, 안 보이면 현재 영상에서 물건별 받침면을 추정한다
+        w = cfg['workspace']
+        self._hold_min_open = float(w.get('grasp_min_opening', 6.0))
+        self._table_default = float(w['table_z_m'])
+        self.table = {'z': None, 'source': 'unknown', 'at': time.monotonic(), 'spread_m': None}
+        self._marker_px = None                     # 마지막으로 본 높이 마커의 네 귀퉁이(영상 좌표)
+        m = w.get('table_marker') or {}
+        self.marker = TableMarker(m, view) if m.get('enabled', True) and m and view is not None and top is not None else None
+        if self.marker is not None:
+            threading.Thread(target=self._table_watch, name='arm-table', daemon=True).start()
         threading.Thread(target=self._hold_watch, name='arm-hold', daemon=True).start()
 
     # ---------------------------------------------------------------- 상태·사건
@@ -78,6 +92,8 @@ class Errand:
     def snapshot(self) -> dict:
         return {'state': self.state, 'since_s': round(time.monotonic() - self.since, 1), 'object': self.object,
                 'detail': self.detail, 'target': self.target,
+                'table': {'z': round(self.table['z'], 3) if self.table['z'] is not None else None, 'source': self.table['source'], 'spread_m': self.table['spread_m'],
+                          'marker_id': self.marker.id if self.marker is not None else None},
                 'inventory': self.inventory, 'inventory_age_s': round(time.monotonic() - self.inventory_at, 1)
                 if self.inventory_at else None, 'scanning': self.scanning,
                 'motions': self.motions(), 'recording': self.recording, 'events': self.events[-12:]}
@@ -86,25 +102,87 @@ class Errand:
     def table_z(self) -> float:
         return float(self.cfg['workspace']['table_z_m'])
 
+    def _arm_folded(self) -> bool:
+        j, rest = self.arm.joints(), self.arm.poses['rest']
+        return not self.arm.moving and all(abs(j[m] - rest[m]) < 6 for m in ARM_JOINTS)
+
+    def measure_table(self, timeout: float = 1.2) -> dict:
+        """매 작업마다 마커를 다시 확인한다. 미검출이면 이전 작업면을 지운다."""
+        m = self.marker.measure(self.top, timeout) if self.marker is not None else None
+        return self._apply_marker(m)
+
+    def _apply_marker(self, m: dict | None) -> dict:
+        if m is not None:
+            new = {'xy': m['xy'], 'slope': m.get('slope'), 'z': m['z'], 'source': 'marker', 'at': time.monotonic(), 'spread_m': m['spread_m']}
+            self._marker_px = m['corners']
+        else:
+            new = {'z': None, 'source': 'unknown', 'at': time.monotonic(), 'spread_m': None}
+            self._marker_px = None
+        self.table = new
+        # 수동 동작의 바닥 제한용 기본값. 물건의 집기 좌표에는 현재 관측만 쓴다.
+        self.cfg['workspace']['table_z_m'] = new['z'] if m is not None else self._table_default
+        return new
+
+    def _table_watch(self) -> None:
+        """쉬는 동안 1초마다 다시 잰다. 로봇이 다른 작업대 앞으로 옮겨 가면 값이 따라간다. 일하는 중에는 건드리지 않는다."""
+        while True:
+            time.sleep(1.0)
+            try:
+                if self.state != IDLE or self.busy.locked() or self.scanning or not self._arm_folded():
+                    continue
+                before = self.since
+                m = self.marker.measure(self.top, 0.8)
+                if self.state != IDLE or self.busy.locked() or self.since != before:
+                    continue                                    # 재는 사이에 일이 시작됐다. 그쪽이 직접 잰다
+                self._apply_marker(m)
+            except Exception:                                   # noqa: BLE001 — 재기가 터져도 심부름은 돌아야 한다
+                log.exception('작업대 높이 재기 실패')
+
+    def _scene_hint(self) -> str:
+        """물건 찾기 모델에게 같이 넘길 작업대 정보(카메라에서 작업대까지 거리, 높이 마커)."""
+        if self.view is None:
+            return ''
+        d = (float(self.view.C[2]) - self.table_z()) * 100
+        if self.table['source'] == 'marker' and self.marker is not None:
+            return (f'작업대 위의 흑백 사각 무늬(ArUco 마커, 한 변 {self.marker.size * 100:.0f} cm)는 작업대 높이를 재는 기준표다. 물건이 아니니 답에 넣지 않는다. '
+                    f'이 마커로 잰 값으로 카메라에서 작업대 윗면까지는 약 {d:.0f} cm다. 마커 한 변의 길이와 이 거리를 물건 크기와 height_cm를 어림하는 기준으로 쓴다.')
+        return (f'높이 기준표를 사용할 수 없다. 카메라 렌즈는 로봇팔 받침 원점보다 수직으로 {self.view.C[2] * 100:.1f} cm 높다. '
+                '현재 사진에서 물건마다 렌즈에서 물건 바로 아래 받침면까지의 수직 거리(cm)를 눈대중으로 추정해 '
+                'support_depth_cm에 담는다. height_cm는 물건 자체의 높이다.')
+
+    def _on_marker(self, item: dict) -> bool:
+        """모델이 높이 마커를 물건으로 답했는가(점이 마커 안에 있고 이름도 마커다)."""
+        if self._marker_px is None or not re.search(r'마커|aruco|qr|바코드|무늬', item.get('label', ''), re.I):
+            return False
+        return cv2.pointPolygonTest(self._marker_px.astype(np.float32), (float(item['u']), float(item['v'])), False) >= 0
+
     def locate(self, item: dict) -> dict:
         """영상 속 물건(u, v, height_m)을 팔 좌표로 옮기고 집을 수 있는지 붙인다."""
         w = self.cfg['workspace']
         h = float(item.get('height_m', 0.03))
-        p = self.view.to_plane(item['u'], item['v'], self.table_z() + h)   # 점은 물건 윗면에 찍힌다
-        out = dict(item, x=round(float(p[0]), 4), y=round(float(p[1]), 4))
+        z = self.table_z()
+        if self.table['source'] != 'marker':
+            depth = item.get('support_depth_m')
+            if depth is None or not math.isfinite(depth) or depth <= 0:
+                raise VisionError('현재 영상에서 물건 받침면까지 거리를 추정하지 못했어요.')
+            z = float(self.view.C[2]) - depth
+            lo, hi = (w.get('table_marker') or {}).get('z_range_m', (-0.08, 0.30))
+            if not lo <= z <= hi:
+                raise VisionError('영상으로 추정한 받침면 높이가 작업 범위 밖이에요.')
+        p = self.view.to_plane(item['u'], item['v'], z + h)   # 점은 물건 윗면에 찍힌다
+        out = dict(item, support_z_m=z, x=round(float(p[0]), 4), y=round(float(p[1]), 4))
         out['reachable'] = bool(w['x_m'][0] <= p[0] <= w['x_m'][1] and w['y_m'][0] <= p[1] <= w['y_m'][1])
         return out
 
     def _hold_watch(self) -> None:
         """들고 기다리는 동안 물건이 빠지면(집게가 끝까지 닫히면) 알리고 팔을 접는다."""
-        min_open = float(self.cfg['workspace'].get('grasp_min_opening', 6.0))
         low = 0
         while True:
             time.sleep(0.2)
             if self.state != HOLDING or self.busy.locked():
                 low = 0
                 continue
-            low = low + 1 if self.arm.joints()['gripper'] <= min_open else 0
+            low = low + 1 if self.arm.joints()['gripper'] <= self._hold_min_open else 0
             if low >= 4:
                 low = 0
                 name = self.object
@@ -140,7 +218,8 @@ class Errand:
     def _scan(self, frame) -> None:
         self.scanning = True
         try:
-            items = [self.locate(i) for i in self.argon.list(frame)]
+            self.measure_table()
+            items = [self.locate(i) for i in self.argon.list(frame, self._scene_hint()) if not self._on_marker(i)]
             self.inventory, self.inventory_at = items, time.monotonic()
             self.emit('scan_done')
             log.info('훑기 %.1f s: %s', self.argon.last_s, ', '.join(i['label'] for i in items) or '없음')
@@ -153,7 +232,7 @@ class Errand:
     # ---------------------------------------------------------------- 공용
     def _run(self, fn, *args) -> None:
         """팔 작업을 뒤에서 돌린다. 이미 도는 것이 있으면 거절한다."""
-        if not self.busy.acquire(blocking=False):
+        if self.arm.motion_blocked or not self.busy.acquire(blocking=False):
             raise Refused('지금 다른 동작을 하는 중이에요.')
 
         def work():
@@ -178,6 +257,34 @@ class Errand:
         self.arm.stop()
         if self.state == TELEOP:
             self.teleop(False)
+
+    def reset(self) -> dict:
+        """현재 자세를 유지하고, 이전 작업이 끝나면 심부름 단계를 비운다."""
+        with self.reset_lock:
+            if self.arm.motion_blocked:
+                return {'pending': True}
+            self.stop()
+            self.arm.stop(block_motion=True)
+
+            def finish():
+                try:
+                    self.object, self.target, self.last_empty = '', None, None
+                    self.events.clear()
+                    self._set(IDLE)
+                finally:
+                    with self.arm.lock:
+                        self.arm.motion_blocked = False
+                    self.busy.release()
+
+            if self.busy.acquire(blocking=False):
+                finish()
+                return {'pending': False}
+
+            def wait_for_job():
+                self.busy.acquire()
+                finish()
+            threading.Thread(target=wait_for_job, name='arm-reset', daemon=True).start()
+            return {'pending': True}
 
     def home(self) -> None:
         """팔을 접는다. 오류에서 빠져나오는 길이기도 하다. 들고 있던 물건은 놓지 않는다."""
@@ -262,17 +369,20 @@ class Errand:
         return {'started': True}
 
     def _fetch(self, name: str) -> None:
+        previous, self.last_empty = self.last_empty, None
         self.object, self.target = name, None
         self._set(LOOKING, name)
         self.emit('looking', name)
         if not self._scene_clear():
             self.arm.pose('rest')
             time.sleep(0.4)
+        # 이 작업대의 높이를 먼저 정한다(높이 마커가 있으면 잰 값). 집는 동안에는 팔이 마커를 가려도 이 값을 그대로 쓴다
+        table = self.measure_table()
         frame = self.top.latest()
         if frame is None:
             raise ArmError('탑뷰 카메라 영상이 없다')
         try:
-            found = self.argon.find(frame, name)
+            found = self.argon.find(frame, name, self._scene_hint())
         except VisionError as e:
             raise ArmError(f'물건 찾기 실패: {e}') from None
         if not found.get('found'):
@@ -285,13 +395,26 @@ class Errand:
             self._set(IDLE)
             self.emit('shown', name, reason='집게가 내려갈 자리를 비워 주세요.')
             return
-        axis = grasp_axis(frame, found.get('box'), found['u'], found['v'])
+        axis = None if found.get('tape_hole') else grasp_axis(frame, found.get('box'), found['u'], found['v'])
         if axis is not None:
             found['u'], found['v'] = axis[0], axis[1]
-        item = self.locate(found)
+        try:
+            item = self.locate(found)
+        except VisionError as e:
+            raise ArmError(str(e)) from None
+        if table['source'] != 'marker':
+            table = {'z': item['support_z_m'], 'source': 'vision', 'at': time.monotonic(), 'spread_m': None}
+            self.table = table
+            self.cfg['workspace']['table_z_m'] = table['z']
+        if axis is not None:
+            u, v, theta, width = axis
+            du, dv = -math.sin(theta) * width / 2, math.cos(theta) * width / 2
+            z = item['support_z_m'] + item['height_m']
+            ends = [self.view.to_plane(u + k * du, v + k * dv, z) for k in (-1, 1)]
+            item['width_m'] = float(np.linalg.norm((ends[1] - ends[0])[:2]))
         self.target = item
-        log.info('찾음 %s → (%.3f, %.3f) h %.3f %s', item['label'], item['x'], item['y'], item['height_m'],
-                 '' if item['reachable'] else '범위 밖')
+        log.info('찾음 %s → (%.3f, %.3f) h %.3f, 작업대 %+.3f(%s) %s', item['label'], item['x'], item['y'], item['height_m'],
+                 table['z'], table['source'], '' if item['reachable'] else '범위 밖')
         if not item['reachable']:
             self.object = ''
             self._set(IDLE)
@@ -300,11 +423,34 @@ class Errand:
         self.object = item['label'] or name
         self._set(PICKING, self.object)
         self.emit('picking', self.object)
-        self._pick(item, axis[2] if axis is not None else None)
+        key = ''.join(name.casefold().split())
+        deeper = bool(previous and previous[0] == key and time.monotonic() - previous[3] < 120
+                      and math.hypot(item['x'] - previous[1], item['y'] - previous[2]) <= 0.04)
+        try:
+            if item.get('same_board') and table.get('slope') is not None:
+                mx, my = table['xy']
+                x, y = item['x'], item['y']
+                if math.hypot(x - mx, y - my) <= 0.18:
+                    self.arm.pick_plane = (mx, my, *table['slope'], x, y)
+                    z = self.arm.surface_height(x, y)
+                    p = self.view.to_plane(item['u'], item['v'], z + item['height_m'])
+                    if not (self.cfg['workspace']['x_m'][0] <= p[0] <= self.cfg['workspace']['x_m'][1]
+                            and self.cfg['workspace']['y_m'][0] <= p[1] <= self.cfg['workspace']['y_m'][1]):
+                        self.object, self.target = '', None
+                        self._set(IDLE)
+                        self.emit('unreachable', item['label'])
+                        return
+                    item.update(x=float(p[0]), y=float(p[1]), support_z_m=z)
+                    log.info('같은 판의 상자 위치 받침면 %+.3f (마커 중심 %+.3f)', z, table['z'])
+            if self._pick(item, axis[2] if axis is not None else None, deeper) and not deeper:
+                self.last_empty = (key, item['x'], item['y'], time.monotonic())
+        finally:
+            self.arm.pick_plane = None
 
-    def _pick(self, item: dict, image_angle: float | None) -> None:
+    def _pick(self, item: dict, image_angle: float | None, deeper: bool = False) -> bool:
+        """실제로 집게를 닫았고 한 번도 물지 못했을 때만 True."""
         w = self.cfg['workspace']
-        z0 = self.table_z()
+        z0 = item['support_z_m']
         clear = float(w.get('grasp_clear_m', 0.012))
         h = float(np.clip(item['height_m'], 0.005, float(w.get('max_height_m', 0.16))))
         # 낮은 물건은 작업대 바로 위를, 키 큰 물건은 윗부분을 잡는다(손바닥이 물건 머리에 닿지 않게).
@@ -312,6 +458,10 @@ class Errand:
         levels = [z0 + max(clear, h - float(w.get('finger_depth_m', 0.045)))]
         if levels[0] > z0 + clear + 0.008:
             levels.append(z0 + clear)
+        if deeper:
+            floor = z0 + float(w['floor_clear_m'])
+            levels = [max(floor, z - float(w.get('retry_deeper_m', 0.003))) for z in levels]
+            log.info('같은 물건 빈손 재시도: 목표 높이 %s mm', [round((z - z0) * 1000) for z in levels])
         x0, y0 = item['x'], item['y']
         axis_world = None
         if image_angle is not None:
@@ -319,9 +469,13 @@ class Errand:
             d = self.view.R[:, 0] * math.cos(image_angle) + self.view.R[:, 1] * math.sin(image_angle)
             axis_world = d / (np.linalg.norm(d[:2]) + 1e-9)
         arm, kin = self.arm, self.arm.kin
-        shift = float(w.get('grasp_shift_m', 0.0))
+        # 테이프 롤은 고정 손가락을 구멍에 넣고 움직이는 손가락으로 바깥쪽을 문다.
+        shift = 0.0 if item.get('tape_hole') else float(w.get('grasp_shift_m', 0.0))
         min_open = float(w.get('grasp_min_opening', 6.0))
-        held, moved = False, False
+        if item.get('tape_hole'):
+            min_open = float(w.get('tape_min_opening', min_open))
+        self._hold_min_open = min_open
+        held, moved, contacted = False, False, False
         for n, grasp_z in enumerate(levels):
             roll = self._roll_for([x0, y0, grasp_z], axis_world)
             x, y = x0, y0
@@ -330,7 +484,19 @@ class Errand:
                 # 끝점 좌표계의 원점은 고정 집게 쪽에 있다. 물건이 두 집게 사이에 오도록 다무는 축을 따라 옮겨 잡는다
                 ax = kin.fk(kin.to_urdf(down))[:3, CLOSING_AXIS]
                 ax = ax[:2] / (np.linalg.norm(ax[:2]) + 1e-9)
-                x, y = x0 + shift * ax[0], y0 + shift * ax[1]
+                offset = shift
+                width = item.get('width_m')
+                if width is None and item.get('box'):
+                    # 윤곽을 분리하지 못한 프레임은 모델 상자를 실제 닫힘 방향에 투영한다.
+                    u0, v0, u1, v1 = item['box']
+                    z = item['support_z_m'] + h
+                    edges = [self.view.to_plane(u, v, z)[:2] @ ax for u in (u0, u1) for v in (v0, v1)]
+                    width = max(edges) - min(edges)
+                if width and width > 0:
+                    offset = min(shift, width / 2)
+                    log.info('물체 폭 %.0f mm, 고정 집게 목표 중심에서 %.0f mm', width * 1000, offset * 1000)
+                x, y = x0 + offset * ax[0], y0 + offset * ax[1]
+                grasp_z += self.arm.surface_height(x, y) - z0
                 down = self._solve([x, y, grasp_z], roll)
             # 위에서 기다리는 높이. 작업대의 다른 물건(키 큰 병, 휴지)을 치지 않게 가장 큰 물건보다 높이 지나가고,
             # 닿지 않으면 조금씩 낮춘다
@@ -356,6 +522,7 @@ class Errand:
             arm.gripper(0.0)
             grip = self._gripper_settled()
             held = grip > min_open
+            contacted |= held
             log.info('그리퍼 %.1f, %.0f mA (높이 %+.3f) → %s', grip, arm.gripper_current(), grasp_z - z0, '잡음' if held else '빈손')
             self._snap('closed')
             arm.move(above, arm.slow)
@@ -368,14 +535,14 @@ class Errand:
             self.object = ''
             self._set(IDLE)
             self.emit('unreachable', item['label'])
-            return
+            return False
         if not held:
             arm.gripper(30.0)
             arm.pose('rest')
             self.object, self.target = '', None
             self._set(IDLE)
             self.emit('missed', item['label'])
-            return
+            return not contacted
         arm.move({m: arm.poses['handover'][m] for m in ARM_JOINTS}, float(w.get('carry_deg_s', arm.slow)))   # 들고는 천천히
         if self._gripper_settled(0.5) <= min_open:              # 옮기다 떨어뜨렸다
             log.info('옮기는 중에 떨어뜨렸다')
@@ -384,10 +551,11 @@ class Errand:
             self.object, self.target = '', None
             self._set(IDLE)
             self.emit('missed', item['label'])
-            return
+            return False
         self.target = None
         self._set(HOLDING, self.object)
         self.emit('holding', self.object)
+        return False
 
     def _trim(self, pos, roll: float) -> None:
         """팔 무게로 처진 만큼(끝점이 5~9 mm 낮고 조금 짧게 온다)을 엔코더로 읽어 한 번 더 맞춘다."""

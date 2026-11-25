@@ -47,7 +47,7 @@ export class ErrandView {
             <form id="errand-form"><input id="errand-name" placeholder="직접 입력: 예) 빨간 뚜껑 병" maxlength="40" autocomplete="off"><button>가져와</button></form></section>
           <section><h2>동작</h2><div class="errand-actions">
             <button id="errand-give" class="go">건네기</button><button id="errand-throw" title="팔을 뒤로 뺐다가 앞으로 휘두르며 놓는다">던지기</button><button id="errand-home">팔 접기</button>
-            <button id="errand-rescan">다시 살피기</button><button id="errand-stop" class="stop">멈춤 <kbd>Space</kbd></button></div></section>
+            <button id="errand-reset" title="Xbox 메뉴(☰) 버튼">단계 초기화</button><button id="errand-rescan">다시 살피기</button><button id="errand-stop" class="stop">멈춤 <kbd>Space</kbd></button></div></section>
           <section><h2>재주 (녹화 동작)</h2><div class="errand-chips" id="errand-motions"></div>
             <div class="errand-rec"><input id="errand-rec-name" placeholder="새 동작 이름" maxlength="32" autocomplete="off">
               <button id="errand-rec-leader" title="리더 팔로 움직이며 녹화">리더로 녹화</button>
@@ -68,6 +68,10 @@ export class ErrandView {
     get('errand-give').onclick = () => void this.cmd({ cmd: 'give' });
     get('errand-throw').onclick = () => void this.cmd({ cmd: 'throw' });
     get('errand-home').onclick = () => void this.cmd({ cmd: 'home' });
+    get('errand-reset').onclick = async () => {
+      const result = await this.bridge.task({ cmd: 'reset' });
+      this.note(result.ok ? (result.pending ? '진행 중인 작업을 멈추고 초기화하는 중입니다.' : '단계를 초기화했습니다.') : result.error ?? '초기화 실패', !result.ok);
+    };
     get('errand-rescan').onclick = () => void this.cmd({ cmd: 'scan' }, '다시 살펴보는 중');
     get('errand-stop').onclick = () => void this.cmd({ cmd: 'stop' });
     get<HTMLFormElement>('errand-form').onsubmit = e => {
@@ -192,7 +196,8 @@ export class ErrandView {
     q('errand-tele').textContent =
       `${arm.torque ? '토크 켜짐' : '토크 꺼짐'} · ${arm.volt.toFixed(1)} V · ${arm.temp_c ?? '-'} °C · 집게 ${Math.round(j.gripper ?? 0)} (${arm.gripper_ma} mA)\n` +
       `관절 ${['shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll'].map(m => (j[m] ?? 0).toFixed(0)).join(' ')}°\n` +
-      `끝점 x ${arm.tip[0].toFixed(3)}  y ${arm.tip[1].toFixed(3)}  z ${arm.tip[2].toFixed(3)} m`;
+      `끝점 x ${arm.tip[0].toFixed(3)}  y ${arm.tip[1].toFixed(3)}  z ${arm.tip[2].toFixed(3)} m\n` +
+      (e.table?.z != null ? `작업대 높이 ${(e.table.z * 100).toFixed(1)} cm · ${e.table.source === 'marker' ? `${e.table.marker_id}번 마커로 잼${e.table.spread_m != null ? ` (±${(e.table.spread_m * 500).toFixed(0)} mm)` : ''}` : '현재 영상 추정값'}` : '작업면 높이 미측정');
     const evKey = String(e.events.at(-1)?.seq ?? 0);
     if (evKey !== this.keys.events) {
       this.keys.events = evKey;

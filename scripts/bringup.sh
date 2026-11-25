@@ -88,6 +88,8 @@ curl -sf -o /dev/null --max-time 1 http://127.0.0.1:8080/ || fail "대시보드�
 echo "  떴다  http://127.0.0.1:8080/"
 
 [[ -n $DOWN ]] && fail "안 뜬 유닛이 있습니다: $DOWN (scripts/robot.sh log 이름 으로 확인)"
+step "대시보드 전방 영상 수신 확인"
+python3 "$ROOT/scripts/wait_camera_frame.py" || fail "전방 영상이 들어오지 않습니다. 카메라 연결과 ~/.cache/booth-dashboard/front_camera.log를 확인해 주세요."
 printf '\n\033[1;32m● 준비 끝.\033[0m 이 창은 5초 뒤에 닫힙니다.\n'
 notify-send -i "$ROOT/scripts/bringup-icon.svg" "로봇 브링업" "준비 끝" 2>/dev/null
 sleep 5

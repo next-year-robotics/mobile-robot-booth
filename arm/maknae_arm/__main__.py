@@ -43,7 +43,28 @@ class App:
             for name, c in cfg['cameras'].items():
                 self.cams[name] = Camera(name, c)
         if 'top' in cfg['cameras']:
-            self.view = TopView(cfg['cameras']['top'])
+            top_cfg = cfg['cameras']['top']
+            self.view = TopView(top_cfg)
+            anchors = top_cfg.get('screw_reference')
+            if anchors and not fake:
+                cam = self.cams['top']
+                patches = cv2.imread(str(Path(anchors['patches']).expanduser()), cv2.IMREAD_GRAYSCALE)
+                end = time.monotonic() + 3
+                seq, reason = 0, '탑뷰 영상 없음'
+                while patches is not None and time.monotonic() < end:
+                    seq = cam.wait_next(seq, timeout=0.5)
+                    frame = cam.latest()
+                    if frame is None:
+                        continue
+                    try:
+                        angle = self.view.align_screws(frame, patches, anchors['centers'])
+                    except (ValueError, cv2.error) as e:
+                        reason = str(e)
+                        continue
+                    log.info('탑뷰 나사 3점 기동 보정 %.2f도', angle)
+                    break
+                else:
+                    log.warning('탑뷰 기동 보정 생략, 저장된 보정 사용: %s', reason if patches is not None else '기준 영상 없음')
         argon = Argon(cfg['vision'])
         if fake and not self.cams and self.view is not None:
             from .sim import Scene, SimArgon, SimCamera          # 팔·카메라 없이 흐름을 끝까지 돌려 보는 가짜 장면
@@ -68,7 +89,7 @@ class App:
             'volt': round(arm.aux.get('volt', 0.0), 1),
             'temp_c': max(arm.aux.get('temp_c', {}).values(), default=None),
             'gripper_ma': round(arm.gripper_current()),
-            'table_z': self.errand.table_z(),
+            'table_z': self.errand.table['z'],
             'cams': {n: {'age_s': None if c.age == float('inf') else round(c.age, 2)} for n, c in self.cams.items()},
             'poses': list(arm.poses),
             'workspace': self.workspace_px(),
@@ -94,6 +115,10 @@ class App:
     def command(self, msg: dict) -> dict | None:
         cmd = msg.get('cmd')
         e, arm = self.errand, self.arm
+        if cmd == 'reset':
+            return e.reset()
+        if arm.motion_blocked:
+            raise Refused('단계를 초기화하고 있어요.')
         if cmd == 'stop':
             e.stop()
             return None

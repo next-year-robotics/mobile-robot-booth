@@ -10,7 +10,7 @@ usb_cam은 ros_ws/src의 패치본(epoch 변환 오류 수정)을 쓴다. apt 0.
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, RegisterEventHandler, TimerAction, LogInfo
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -23,7 +23,10 @@ def _setup(context, *args, **kwargs):
     src = os.path.expanduser(LaunchConfiguration('mobile_robot').perform(context))
     pkgs = os.path.join(src, 'software', 'ros_pkgs')
     # usb_cam은 심볼릭 링크를 '/dev/' + 링크 내용으로 풀어서 by-id 경로(../../videoN)를 못 연다. 여기서 풀어 준다.
-    device = os.path.realpath(LaunchConfiguration('video_device').perform(context))
+    path = LaunchConfiguration('video_device').perform(context)
+    if not os.path.exists(path):
+        return [TimerAction(period=1.0, actions=[OpaqueFunction(function=_setup)])]
+    device = os.path.realpath(path)
     marker_size = float(LaunchConfiguration('marker_size').perform(context))
     profile = os.path.join(pkgs, 'mr_bringup', 'config', 'fastdds_camera.xml')
     camera = Node(
@@ -58,5 +61,6 @@ def generate_launch_description():
         DeclareLaunchArgument('video_device', default_value=DEFAULT_DEVICE),
         DeclareLaunchArgument('mobile_robot', default_value='~/dev/mobile-robot'),
         DeclareLaunchArgument('marker_size', default_value='0.0', description='0이면 aruco_tracker.yaml 값'),
+        LogInfo(msg=['전방 카메라 장치 대기: ', LaunchConfiguration('video_device')]),
         OpaqueFunction(function=_setup),
     ])

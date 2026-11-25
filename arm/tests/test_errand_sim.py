@@ -17,6 +17,7 @@ def app(tmp_path):
     from maknae_arm.__main__ import App
     cfg = yaml.safe_load((ROOT / 'config' / 'arm.yaml').read_text(encoding='utf-8'))
     cfg['motions_dir'] = str(tmp_path)
+    cfg['vision']['debug_dir'] = str(tmp_path / 'pick')
     cfg['arm']['speed_deg_s'] = cfg['arm']['slow_deg_s'] = 2000        # 시험에서는 빨리 움직인다
     a = App(cfg, fake=True)
     a.errand.argon.delay = 0.05
@@ -64,7 +65,7 @@ def test_not_found_and_unreachable(app):
 
 
 def test_grasp_point_obstructed(app, monkeypatch):
-    monkeypatch.setattr(app.errand.argon, 'find', lambda frame, name: {
+    monkeypatch.setattr(app.errand.argon, 'find', lambda frame, name, hint='': {
         'found': True, 'grasp_clear': False, 'reason': '집게 위치와 손가락이 겹침'})
     app.command({'cmd': 'fetch', 'name': '흰색 테이프'})
     wait(app, 'idle')
@@ -74,7 +75,7 @@ def test_grasp_point_obstructed(app, monkeypatch):
 
 def test_presented_object_picked_with_one_request(app, monkeypatch):
     find = app.errand.argon.find
-    monkeypatch.setattr(app.errand.argon, 'find', lambda frame, name: {
+    monkeypatch.setattr(app.errand.argon, 'find', lambda frame, name, hint='': {
         **find(frame, name), 'grasp_clear': True})
     app.command({'cmd': 'fetch', 'name': '귤'})
     wait(app, 'holding')
@@ -123,3 +124,37 @@ def test_throw_winds_back_then_opens_mid_swing(app):
     # 뒤로 뺀 다음에, 앞으로 뻗기 전에(휘두르는 도중에) 열린다
     assert opened > back
     assert t['back']['shoulder_lift'] + 15 < lift[opened] < t['front']['shoulder_lift'] - 5
+
+
+def test_repeat_empty_pick_lowers_once(app, monkeypatch):
+    errand = app.errand
+    heights = []
+    item = errand.argon.find(app.cams['top'].latest(), '귤')
+    monkeypatch.setattr(errand.argon, 'find', lambda *args: {**item, 'box': None, 'height_m': 0.02})
+    monkeypatch.setattr(errand, '_trim', lambda pos, roll: heights.append(pos[2] - errand.table_z()))
+    monkeypatch.setattr(errand, '_gripper_settled', lambda *args: 0)
+    for _ in range(3):
+        app.command({'cmd': 'fetch', 'name': '귤'})
+        wait(app, 'idle')
+        assert kinds(app)[-1] == 'missed'
+    assert heights == pytest.approx([0.008, 0.005, 0.008])
+
+
+def test_reset_during_job_blocks_late_motion(app):
+    import threading
+    resume = threading.Event()
+
+    def job():
+        resume.wait(3)
+        app.arm.gripper(100)
+
+    app.errand._set('looking', '귤')
+    app.errand.object = '귤'
+    app.errand._run(job)
+    before = dict(app.arm.target)
+    assert app.command({'cmd': 'reset'})['pending']
+    resume.set()
+    wait(app, 'idle')
+    assert app.arm.target == before
+    assert app.errand.object == '' and app.errand.target is None
+    assert app.command({'cmd': 'reset'}) == {'pending': False}

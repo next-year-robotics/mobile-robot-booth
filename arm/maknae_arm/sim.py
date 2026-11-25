@@ -60,7 +60,17 @@ class Scene:
     def __init__(self, cfg: dict, arm, view: TopView):
         self.cfg, self.arm, self.view = cfg, arm, view
         self.things = [Thing(*o) for o in OBJECTS]
-        self.z0 = float(cfg['workspace']['table_z_m'])
+        sim = cfg.get('sim') or {}
+        # 가짜 작업대의 진짜 높이. 설정값(workspace.table_z_m)과 다르게 두면 높이 마커로 재는 길을 시험할 수 있다
+        self.z0 = float(sim.get('table_z_m', cfg['workspace']['table_z_m']))
+        # 작업대 위 높이 마커. 가운데 [x, y]. 없으면 그리지 않는다
+        m = cfg['workspace'].get('table_marker') or {}
+        self.marker_xy = sim.get('table_marker_xy', [0.14, 0.0]) if m.get('enabled', True) and m else None
+        if self.marker_xy is not None:
+            self.marker_z = self.z0 + float(m.get('thickness_m', 0.0))
+            size, self.marker_m = 240, float(m.get('size_m', 0.08))
+            art = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), int(m.get('id', 10)), size)
+            self.marker_img = cv2.cvtColor(cv2.copyMakeBorder(art, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255), cv2.COLOR_GRAY2BGR)
         self.lock = threading.Lock()
         self._prev_grip = arm.joints()['gripper']
 
@@ -73,7 +83,7 @@ class Scene:
             held = next((t for t in self.things if t.held), None)
             if held is None and grip < 12 <= self._prev_grip:
                 for t in self.things:
-                    if t.visible and np.linalg.norm(tip[:2] - t.xy) < max(0.03, t.radius * 0.6) and tip[2] < self.z0 + t.h + 0.03:
+                    if t.visible and np.linalg.norm(tip[:2] - t.xy) < max(0.04, t.radius * 0.6) and tip[2] < self.z0 + t.h + 0.03:
                         t.held = True
                         arm.bus.grip_floor = 14.0
                         break
@@ -104,6 +114,16 @@ class Scene:
         cv2.fillPoly(img, [np.array([px([x, y, self.z0]) for x, y in table], np.int32)], (150, 185, 205))
         deck = [(-0.10, -0.12), (0.07, -0.12), (0.07, 0.12), (-0.10, 0.12)]
         cv2.fillPoly(img, [np.array([px([x, y, self.z0 - 0.02]) for x, y in deck], np.int32)], (120, 160, 190))
+        if self.marker_xy is not None:
+            # 종이는 마커보다 사방 1 cm 크다(흰 여백)
+            half, (mx, my) = self.marker_m * 0.625, self.marker_xy
+            quad = np.array([px3 for px3 in (self.view.project([mx + dx, my + dy, self.marker_z])
+                             for dx, dy in ((half, half), (half, -half), (-half, -half), (-half, half)))], np.float32)
+            n = self.marker_img.shape[0]
+            H = cv2.getPerspectiveTransform(np.array([[0, 0], [n, 0], [n, n], [0, n]], np.float32), quad)
+            paper = cv2.warpPerspective(self.marker_img, H, (w, h), flags=cv2.INTER_AREA)
+            mask = cv2.warpPerspective(np.full((n, n), 255, np.uint8), H, (w, h))
+            img[mask > 127] = paper[mask > 127]
         with self.lock:
             things = [(t, t.visible, t.held) for t in self.things]
         for t, visible, _ in things:
@@ -136,7 +156,7 @@ class Scene:
                 top = np.array([self.view.project(p) for p in t.outline(self.z0 + t.h)])
                 base = np.array([self.view.project(p) for p in t.outline(self.z0)])
                 both = np.vstack([top, base])
-                out.append({'label': t.label, 'u': float(u), 'v': float(v), 'height_m': t.h,
+                out.append({'label': t.label, 'u': float(u), 'v': float(v), 'height_m': t.h, 'support_depth_m': float(self.view.C[2]) - self.z0,
                             'box': [float(both[:, 0].min()), float(both[:, 1].min()), float(both[:, 0].max()), float(both[:, 1].max())]})
         return out
 
@@ -152,7 +172,8 @@ class SimCamera:
         self._jpeg: tuple[int, bytes] | None = None
         self.cond = threading.Condition()
         self._stop = threading.Event()
-        threading.Thread(target=self._loop, name='cam-sim', daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, name='cam-sim', daemon=True)
+        self._thread.start()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -166,6 +187,7 @@ class SimCamera:
 
     def close(self) -> None:
         self._stop.set()
+        self._thread.join()
 
     @property
     def age(self) -> float:
@@ -173,7 +195,7 @@ class SimCamera:
 
     def latest(self) -> np.ndarray | None:
         with self.cond:
-            return None if self.frame is None else self.frame.copy()
+            return None if self._stop.is_set() or self.frame is None else self.frame.copy()
 
     def jpeg(self, quality: int = 80) -> bytes | None:
         with self.cond:
@@ -205,11 +227,13 @@ class SimArgon:
         self.calls += 1
         self.last_s = self.delay
 
-    def list(self, frame) -> list[dict]:
+    def list(self, frame, hint: str = '') -> list[dict]:
+        self.hint = hint
         self._wait()
         return self.scene.detections()
 
-    def find(self, frame, name: str) -> dict:
+    def find(self, frame, name: str, hint: str = '') -> dict:
+        self.hint = hint
         self._wait()
         items = self.scene.detections()
         key = name.replace(' ', '')

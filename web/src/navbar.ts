@@ -45,8 +45,10 @@ export class NavBar {
     if (this.home) this.home.disabled = !nav || !nav.home;
     let text = NAV_OFF, state = 'off';
     if (nav) {
-      if (running) { text = `${t!.title} ${t!.step}/${t!.steps}${t!.detail ? ` · ${t!.detail}` : ''}`; state = 'running'; }
+      const planTag = s.plan && s.plan.pts.length >= 2 ? ` · Nav2 A* ${s.plan.len_m.toFixed(2)} m` : '';
+      if (running) { text = `${t!.title} ${t!.step}/${t!.steps}${t!.detail ? ` · ${t!.detail}` : ''}${planTag}`; state = 'running'; }
       else if (t?.state === 'failed') { text = `${t.title} 실패`; state = 'failed'; }
+      else if (nav.backend === 'nav2') { text = '대기 · Nav2 A* + 라이다'; state = 'idle'; }
       else { text = nav.lidar ? '대기 · 라이다로 앞을 봄' : '대기 · 라이다 없음(장애물을 못 봄)'; state = 'idle'; }
     }
     if (this.status.textContent !== text) this.status.textContent = text;

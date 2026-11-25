@@ -102,9 +102,11 @@ class BoothServer:
                         # 장소로 가기·가져오기·돌아오기. 수락·거절을 id와 함께 돌려준다
                         body = msg.get('msg')
                         if self.tasks is None or not isinstance(body, dict):
-                            result = {'ok': False, 'error': '이동 기능이 꺼져 있어요.'}
+                            # direct: 팔 일(집기·건네기)은 순서기 없이 팔에 바로 시키면 된다
+                            result = {'ok': False, 'error': '이동 기능이 꺼져 있어요.',
+                                      'direct': isinstance(body, dict) and body.get('cmd') in ('fetch', 'give')}
                         else:
-                            result = self.tasks.request(body)
+                            result = await asyncio.to_thread(self.tasks.request, body)
                             log.info('작업 %s → %s', body.get('cmd'), 'ok' if result.get('ok') else result.get('error'))
                         await ws.send(json.dumps({'type': 'reply', 'id': msg.get('id'), **result}, ensure_ascii=False))
                     elif msg.get('cmd') == 'layout':

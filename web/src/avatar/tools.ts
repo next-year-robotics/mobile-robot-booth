@@ -12,9 +12,10 @@ export function visiblePlaces(s: State | null, places: Place[]): string[] {
   return places.filter(p => seen.has(p.marker_id)).map(p => p.label);
 }
 
-/** 지금 카메라에 보이는 마커 번호 */
+/** 지금 카메라에 보이는 마커 번호. 작업대 높이 마커(팔 데몬 workspace.table_marker)는 갈 곳이 아니라서 뺀다 */
 export function visibleMarkers(s: State | null): number[] {
-  return [...new Set([...(s?.nav?.visible ?? []), ...(s?.markers3d ?? []).map(m => m.id)])].sort((a, b) => a - b);
+  const table = s?.arm?.errand.table?.marker_id;
+  return [...new Set([...(s?.nav?.visible ?? []), ...(s?.markers3d ?? []).map(m => m.id)])].filter(i => i !== table).sort((a, b) => a - b);
 }
 
 /** 모델이 준 숫자(문자열로 오기도 한다)를 읽는다. 없거나 숫자가 아니면 null */
@@ -51,6 +52,8 @@ export function robotStatus(s: State | null, fresh: boolean, places: Place[] = [
     marker: s.marker && s.marker.age_s != null && s.marker.age_s < 3 ? s.marker.status : null,
     input: s.mux.active,
     arm: s.arm ? { state: s.arm.errand.state, holding: s.arm.errand.state === 'holding' ? s.arm.errand.object : null } : null,
+    // 작업대 높이(팔 받침 기준). 작업대 위에 높이 마커가 보이면 그것으로 잰 값이다
+    work_table: s.arm?.errand.table?.z != null ? { source: s.arm.errand.table.source, height_cm: Math.round(s.arm.errand.table.z * 1000) / 10, measured_by_marker: s.arm.errand.table.source === 'marker' } : null,
     // 말로 시킨 이동·심부름
     errand: t ? { doing: t.title, state: t.state, detail: t.detail || t.problem || null } : null,
     can_move_to_places: !!s.nav, places_in_view: visiblePlaces(s, places), markers_in_view: visibleMarkers(s),
@@ -84,6 +87,8 @@ export interface ToolContext {
   nav?: () => { enabled: boolean; follow_marker_id?: number; nudge_m?: number; turn_deg?: number } | undefined;
   /** 앞 보기(브리지 hello.look)가 켜져 있는가. 꺼져 있으면 look_front가 빠진다 */
   look?: () => boolean;
+  /** 사람이 말을 걸 때마다 느는 번호(LiveVoice.turn). 같은 말에서 나온 도구 호출은 브리지가 차례대로 잇는다 */
+  turn?: () => number;
 }
 
 export function buildTools(ctx: ToolContext): { decls: ToolDecl[]; handlers: Record<string, ToolHandler> } {
@@ -131,19 +136,41 @@ export function buildTools(ctx: ToolContext): { decls: ToolDecl[]; handlers: Rec
   if (moving && places.length) decls.push(
     { name: 'go_to_place', behavior: 'NON_BLOCKING', description: '그 장소에 붙여 둔 마커를 찾아 그 앞까지 스스로 간다. 마커가 안 보이면 제자리에서 돌며 찾는다. 도착하면 [로봇 알림]이 온다.',
       parameters: { type: 'OBJECT', properties: { place: placeEnum }, required: ['place'] } },
-    { name: 'fetch_from_place', behavior: 'NON_BLOCKING', description: '장소로 가서 그곳의 물건을 로봇팔로 집고, 출발한 자리로 돌아온다. 한 번에 끝까지 한다.',
-      parameters: { type: 'OBJECT', properties: { place: placeEnum, name: { type: 'STRING', description: '가져올 물건을 가리키는 말' } }, required: ['place', 'name'] } },
+    { name: 'fetch_from_place', behavior: 'NON_BLOCKING', description: '다녀오는 심부름. 장소(place)나 번호로 말한 마커(marker_id) 앞의 작업대로 가서 물건을 로봇팔로 집고, 시킨 자리로 돌아와 원래 보던 쪽으로 선다. 가기·집기·돌아오기를 이 도구 하나가 끝까지 한다. 돌아온 뒤에는 물건을 들고 기다린다(사람이 "줘"라고 하면 give_object).',
+      parameters: { type: 'OBJECT', properties: { place: placeEnum, marker_id: { type: 'INTEGER', description: '장소 이름 대신 "7번 마커로 가서"처럼 번호로 말했을 때의 마커 번호(0~49). 장소를 말했으면 비운다.' },
+        name: { type: 'STRING', description: '가져올 물건을 가리키는 말' },
+        hand_over: { type: 'BOOLEAN', description: '"가져와서 나한테 줘", "갖다줘"처럼 건네 달라는 말까지 했으면 true. 돌아와서 바로 건넨다. "가져와"뿐이면 비운다.' } }, required: ['name'] } },
   );
+  // 여러 동작을 한 문장으로 시키면("책상으로 가서 약통 집고 돌아와") 모델이 도구를 여럿 부르기도 한다. 같은 말(turn)에서
+  // 나온 요청은 브리지 순서기가 덮어쓰지 않고 차례대로 잇는다. 팔에 바로 시킨 집기가 있었으면 이동은 그것이 끝난 뒤에 출발한다.
+  const turn = () => ctx.turn?.() ?? null;
+  let armTurn: number | null = null;              // 이 말에서 팔에 바로 집기를 시켰다
   const task = async (msg: Record<string, unknown>, clip: string, note: string) => {
     if (!ctx.fresh()) return { ok: false, error: '로봇과 연결이 끊겼어요.' };
-    const r = await ctx.bridge.task(msg);
+    const t = turn();
+    const r = await ctx.bridge.task({ ...msg, ...(t !== null ? { turn: t } : {}), ...(t !== null && t === armTurn ? { after_arm: true } : {}) }) as { ok: boolean; error?: string; chained?: boolean };
     if (!r.ok) return { ok: false, error: r.error ?? '실패' };
+    if (r.chained) return { ok: true, silent: true };      // 하던 일 뒤에 이었다. 출발 안내는 이미 나갔다
     return clip && ctx.hasClip?.(clip) ? { ok: true, silent: true } : { ok: true, note };
   };
   const armCall = async (msg: Record<string, unknown>) => {
     if (!arm()) return noArm;
     const r = await ctx.bridge.arm(msg);
     return r.ok ? { ok: true, silent: true } : { ok: false, error: r.error ?? '실패' };
+  };
+  /** 집기·건네기. 이동하는 일을 하는 중이면 그 뒤에 잇고(도착해서 집는다, 돌아와서 건넨다), 아니면 팔에 바로 시킨다. */
+  const armOrChain = async (msg: Record<string, unknown>, queued: string) => {
+    if (!arm()) return noArm;
+    const t = turn();
+    if (moving) {
+      const r = await ctx.bridge.task({ ...msg, ...(t !== null ? { turn: t } : {}) }) as { ok: boolean; error?: string; direct?: boolean; same_turn?: boolean };
+      // 같은 말에서 이어진 것이면 출발 안내가 이미 나갔다. 조용히 있는다
+      if (r.ok) return r.same_turn ? { ok: true, silent: true } : { ok: true, note: queued };
+      if (!r.direct) return { ok: false, error: r.error ?? '실패' };
+    }
+    const r = await armCall(msg);
+    if (r.ok && msg.cmd === 'fetch') armTurn = t;
+    return r;
   };
   const follow = () => {
     const s = ctx.state();
@@ -194,9 +221,11 @@ export function buildTools(ctx: ToolContext): { decls: ToolDecl[]; handlers: Rec
     },
     go_to_place: args => task({ cmd: 'goto', place: str(args.place) }, 'nav_go', '출발했다. 다녀오겠다고 한 문장으로만 말해라.'),
     fetch_from_place: args => {
-      const name = str(args.name);
-      return name ? task({ cmd: 'fetch_from', place: str(args.place), name }, 'nav_go', '출발했다. 가서 가져오겠다고 한 문장으로만 말해라.')
-        : { ok: false, error: '무엇을 가져올지 이름이 없다.' };
+      const name = str(args.name), place = str(args.place), id = num(args.marker_id);
+      if (!name) return { ok: false, error: '무엇을 가져올지 이름이 없다.' };
+      if (!place && id === null) return { ok: false, error: '어디에서 가져올지 장소나 마커 번호를 말해 주세요.' };
+      return task({ cmd: 'fetch_from', ...(place ? { place } : { marker_id: Math.round(id!) }), name, ...(args.hand_over === true || args.hand_over === 'true' ? { hand_over: true } : {}) },
+        'nav_go', '출발했다. 가서 가져오겠다고 한 문장으로만 말해라.');
     },
     return_home: () => task({ cmd: 'home' }, 'nav_return', '돌아가기 시작했다. 한 문장으로만 말해라.'),
     set_expression: args => {
@@ -223,9 +252,9 @@ export function buildTools(ctx: ToolContext): { decls: ToolDecl[]; handlers: Rec
     },
     fetch_object: args => {
       const name = str(args.name);
-      return name ? armCall({ cmd: 'fetch', name }) : { ok: false, error: '무엇을 가져올지 이름이 없다.' };
+      return name ? armOrChain({ cmd: 'fetch', name }, '가는 중이라 도착하면 집는다. "도착하면 집을게요" 정도로 한 문장만 말해라.') : { ok: false, error: '무엇을 가져올지 이름이 없다.' };
     },
-    give_object: () => armCall({ cmd: 'give' }),
+    give_object: () => armOrChain({ cmd: 'give' }, '아직 가는 중이라 도착하면 건넨다. "도착하면 드릴게요" 정도로 한 문장만 말해라.'),
     play_motion: args => armCall({ cmd: 'motion', name: str(args.name, 32) }),
     follow_me: follow,
     stop_moving: () => {

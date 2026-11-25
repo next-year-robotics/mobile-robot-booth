@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -121,6 +122,7 @@ class Arm:
         self.cfg, self.kin = cfg, kin
         a = cfg['arm']
         self.rate = float(a['rate_hz'])
+        self.pick_plane = None
         self.speed = float(a['speed_deg_s'])
         self.slow = float(a['slow_deg_s'])
         self.poses = {k: {m: float(v) for m, v in p.items()} for k, p in cfg['poses'].items()}
@@ -135,6 +137,7 @@ class Arm:
         self.fault = ''
         self._queue: list[tuple[float, dict[str, float]]] = []   # (시각, 목표)
         self._cancel = threading.Event()
+        self.motion_blocked = False
         self._stop = threading.Event()
         self._teleop = None                          # 호출하면 목표 dict를 돌려주는 함수(리더 팔)
         self._recorder: list | None = None
@@ -212,6 +215,15 @@ class Arm:
         return abs(float(self.aux['current_ma'].get('gripper', 0.0)))
 
     # ---------------------------------------------------------------- 안전 검사
+    def surface_height(self, x, y) -> float:
+        z = float(self.cfg['workspace']['table_z_m'])
+        if self.pick_plane is None:
+            return z
+        mx, my, sx, sy, tx, ty = self.pick_plane
+        # 현재 집기 주변에서만 판의 경사를 사용하고, 멀어지면 기존 바닥으로 이어 준다.
+        weight = max(0.0, min(1.0, (0.09 - math.hypot(x - tx, y - ty)) / 0.04))
+        return z + weight * max(-0.02, min(0.02, (x - mx) * sx + (y - my) * sy))
+
     def guard(self, deg: dict[str, float]) -> str:
         """이 자세가 차체·작업대와 부딪히면 이유를, 아니면 빈 문자열을 돌려준다."""
         ranges = getattr(self.bus, 'ranges', None)
@@ -222,13 +234,13 @@ class Arm:
                     return f'{m} {deg[m]:.0f}°가 범위 [{lo:.0f}, {hi:.0f}] 밖'
         pts = self.kin.points(self.kin.to_urdf(deg))
         w = self.cfg['workspace']
-        table = float(w['table_z_m']) + float(w['floor_clear_m'])
         deck_x = float(w.get('deck_front_x_m', 0.10))
         for name, p in zip(('pan', 'lift', 'elbow', 'wrist', 'roll', 'tip'), pts):
             if name in ('pan', 'lift'):
                 continue                              # 어깨는 움직이지 않는 자리다
             if p[0] < -0.12:
                 return f'{name}이 뒤쪽 노트북 영역으로 들어간다 (x {p[0]:.2f})'
+            table = self.surface_height(p[0], p[1]) + float(w['floor_clear_m'])
             floor = 0.035 if p[0] < deck_x else min(table, 0.035) if p[0] < deck_x + 0.03 else table
             if name != 'tip':
                 floor += 0.02                         # 관절 몸통 두께
@@ -263,9 +275,9 @@ class Arm:
                 why = self.guard(g)
                 if why:
                     raise ArmError(f'경로가 막힌다: {why}')
-        self._cancel.clear()
         t0 = time.monotonic()
         with self.lock:
+            self._begin_motion()
             self._queue = [(t0 + t, g) for t, g in steps]
             self.moving = True
         if not wait:
@@ -295,9 +307,9 @@ class Arm:
             why = self.guard(g)
             if why:
                 raise ArmError(f'경로가 막힌다: {why}')
-        self._cancel.clear()
         t0 = time.monotonic()
         with self.lock:
+            self._begin_motion()
             self._queue = [(t0 + t, g) for t, g in steps]
             self.moving = True
         end = t0 + steps[-1][0]
@@ -313,17 +325,25 @@ class Arm:
 
     def set_gripper_target(self, value: float) -> None:
         with self.lock:
-            if not self.torque or self._teleop is not None or self._queue:
+            if self.motion_blocked or not self.torque or self._teleop is not None or self._queue:
                 raise ArmError('현재 집게를 직접 조작할 수 없다')
             self._queue.append((time.monotonic(), {'gripper': float(np.clip(value, 0, 100))}))
 
     def gripper(self, value: float, wait: bool = True) -> None:
         self.move({'gripper': float(np.clip(value, 0.0, 100.0))}, check=False, wait=wait)
 
-    def stop(self) -> None:
+    def _begin_motion(self) -> None:
+        # 호출자가 lock을 잡고 큐를 교체한다. 이전 작업이 비전 응답 뒤 다시 움직이지 못하게 한다.
+        if self.motion_blocked:
+            raise ArmError('멈춤')
+        self._cancel.clear()
+
+    def stop(self, *, block_motion: bool = False) -> None:
         """지금 자리에서 멈춘다. 진행 중이던 move는 ArmError('멈춤')로 끝난다."""
-        self._cancel.set()
         with self.lock:
+            self._cancel.set()
+            if block_motion:
+                self.motion_blocked = True
             self._queue = []
             self.moving = False
 
@@ -366,8 +386,8 @@ class Arm:
             raise ArmError('토크가 꺼져 있다')
         if self._teleop is not None:
             raise ArmError('텔레옵 중이다')
-        self._cancel.clear()
         with self.lock:
+            self._begin_motion()
             self._queue = list(steps)
             self.moving = True
         end = steps[-1][0]
@@ -381,9 +401,9 @@ class Arm:
         if not frames:
             return
         self.move(frames[0][1], self.slow, check=False)
-        self._cancel.clear()
         t0 = time.monotonic() + 0.1
         with self.lock:
+            self._begin_motion()
             self._queue = [(t0 + t / rate, g) for t, g in frames]
             self.moving = True
         end = t0 + frames[-1][0] / rate

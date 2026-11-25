@@ -40,8 +40,9 @@ const TRIP: Record<string, (e: TaskEvent) => [string, string] | null> = {
   arrived: e => ['nav_arrived', `${e.label}에 도착했다.`],
   fetching: () => null,                                    // 팔 사건(찾아볼게요, 집어 올게요)이 따로 말한다
   return_start: e => ['nav_return', e.task === 'home' ? '원래 자리로 돌아가기 시작했다.' : '이제 원래 자리로 돌아간다.'],
-  returned: e => e.got ? ['holding', `${e.got}을(를) 가지고 돌아왔다. 받으려면 "줘"라고 말해 달라고 안내한다.`]
-    : e.task === 'fetch_from' ? ['nav_back_empty', `돌아왔지만 ${e.object}은(는) 가져오지 못했다.`] : ['nav_back', '원래 자리로 돌아왔다.'],
+  // 건네기가 이어지면(give) 돌아왔다는 말은 건너뛴다. 곧바로 팔이 "여기요" 하며 내민다
+  returned: e => e.got ? (e.give ? null : ['holding', `${e.got}을(를) 가지고 돌아왔다. 받으려면 "줘"라고 말해 달라고 안내한다.`])
+    : e.object ? ['nav_back_empty', `돌아왔지만 ${e.object}은(는) 가져오지 못했다.`] : ['nav_back', '원래 자리로 돌아왔다.'],
   failed: e => [e.reason === 'not_found' ? 'nav_not_found' : e.reason === 'blocked' ? 'nav_blocked' : e.reason === 'lost' ? 'marker_lost' : 'nav_failed',
     `이동하지 못했다. ${e.say ?? ''}`],
   cancelled: () => ['stopped', '이동을 멈췄다.'],
@@ -93,7 +94,7 @@ export class Assistant {
       tools: () => {
         const t = buildTools({ bridge, playIntroduction: () => playPerformance('intro'), playTalentShow: () => playPerformance('keonroot-challenge'), state: () => this.state, fresh: () => this.fresh,
           setExpression: (n, s) => this.expression(n, s),
-          places: () => bridge.hello?.places ?? [], nav: () => bridge.hello?.nav, look: () => !!bridge.hello?.look, hasClip: key => settings.value.clips && this.clips.has(key) });
+          places: () => bridge.hello?.places ?? [], nav: () => bridge.hello?.nav, look: () => !!bridge.hello?.look, turn: () => this.live.turn, hasClip: key => settings.value.clips && this.clips.has(key) });
         // 말로 시킨 일은 모델이 곧바로 대답한다. 같은 일의 녹음 대사·알림이 겹치지 않게 시각을 적어 둔다
         for (const name of ['fetch_object', 'give_object', 'throw_object', 'play_motion', 'stop_moving', 'go_to_place', 'fetch_from_place', 'return_home',
           'move_robot', 'go_to_marker', 'follow_marker']) {
@@ -242,7 +243,7 @@ export class Assistant {
         if (note) this.lastResult = { text: note.split('.')[0], at: now };
         if (e.type === 'stopped') { this.sayOnce('stopped', 3, true); continue; }
         // 다녀오는 심부름 중에 집은 것은 멀리 있는 책상 앞이다. "가져왔어요"는 돌아와서 말한다
-        if (e.type === 'holding' && s.tasks?.task?.state === 'running' && s.tasks.task.kind === 'fetch_from') continue;
+        if (e.type === 'holding' && s.tasks?.task?.state === 'running' && s.tasks.task.carry) continue;
         // 로봇 대사가 모델의 말보다 먼저다. '집어 올게요'만은 앞선 '찾아볼게요'를 끊지 않게 양보한다
         this.say(key, e.type !== 'picking');
       }

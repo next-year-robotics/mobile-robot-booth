@@ -199,3 +199,53 @@ def test_lb_rt_gripper(st):
     assert grip(1.6, -1, []) is None
     assert grip(1.7, -1) == (2, 0)
     assert st.pad_grip(2.3) is None
+
+
+def test_menu_reset_requires_a_complete_solo_click(st):
+    resets = []
+    st.pad_reset_hook = lambda: resets.append(True)
+
+    def sample(now, *pressed):
+        st.on_joy(now, [int(i in pressed) for i in range(13)])
+
+    sample(1, 11)  # 연결 때 이미 눌린 버튼
+    sample(1.1)
+    sample(1.2, 11)
+    sample(1.3, 11)
+    sample(1.4)
+    sample(1.5)
+    assert resets == [True]
+    sample(2, 10)
+    sample(2.1, 10, 11)
+    sample(2.2, 11)
+    sample(2.3)
+    sample(3)
+    sample(3.1, 11)
+    sample(3.2, 10, 11)
+    sample(3.3, 10)
+    sample(3.4)
+    sample(3.5, 11)
+    sample(5)  # 입력이 끊긴 뒤 버튼을 놓은 상태로 다시 연결
+    assert resets == [True]
+
+
+def test_nav_plan_downsamples_and_hides_when_idle(st):
+    # 200점 곡선 경로를 넣으면 길이를 계산하고 140점 이하로 줄여 스냅샷에 싣는다
+    pts = [(i * 0.02, math.sin(i * 0.05) * 0.4) for i in range(200)]
+    st.on_nav(1.0, {'state': 'driving', 'id': 't1-0', 'backend': 'nav2'})
+    st.on_plan(1.0, pts, 'odom')
+    snap = st.snapshot(1.5)
+    assert snap['plan'] is not None
+    assert 2 <= len(snap['plan']['pts']) <= 140
+    assert snap['plan']['pts'][0] == [0.0, 0.0]
+    assert snap['plan']['pts'][-1][0] == pytest.approx(pts[-1][0], abs=1e-3)
+    assert snap['plan']['len_m'] > 4.0
+    # 도착하면 경로 표시를 거둔다
+    st.on_nav(2.0, {'state': 'arrived', 'id': 't1-0', 'backend': 'nav2'})
+    assert st.snapshot(2.1)['plan'] is None
+    # mux 우선순위: align > nav > follow
+    st.on_cmd(3.0, 'follow', 0.1, 0)
+    st.on_cmd(3.0, 'nav', 0.2, 0)
+    assert st.snapshot(3.05)['mux']['active'] == 'nav'
+    st.on_cmd(3.0, 'align', 0.1, 0)
+    assert st.snapshot(3.05)['mux']['active'] == 'align'

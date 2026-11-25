@@ -25,6 +25,7 @@ ros:
     cmd_inputs:                   # twist_mux 입력. 어느 쪽이 지금 모는지 보여 준다
       teleop: /cmd_vel_teleop
       align: /cmd_vel_align
+      nav: /cmd_vel_nav
       follow: /cmd_vel_follow
     phone_link: /phone/link_status
     app_status: /robot/app_status
@@ -33,6 +34,7 @@ ros:
     scan: /scan                   # RPLIDAR C1 (sllidar_ros2, laser_link)
     nav_command: /nav/command     # 작업 순서기 → Pi robot/errand_nav.py (JSON)
     nav_status: /nav/status
+    nav_plan: /plan               # Nav2 전역 경로 (nav_msgs/Path)
 
 robot:
   # mr_base/config 유효값. 바퀴 회전각 → 지면 속도 변환에 쓴다.
@@ -107,10 +109,17 @@ nav:
   # "뒤로 조금만", "앞으로 가"처럼 거리를 말하지 않았을 때 가는 거리 [m]와 "돌아 봐"의 각도 [deg]
   nudge_m: 0.3
   turn_deg: 90
+  # 다녀오는 심부름("○○에서 △△ 가져와"): 번호로 말한 마커 앞에 설 거리 [m](팔이 닿게 가까이), 마커 정면에 맞춰 서기,
+  # 도착해서 팔이 물건을 찾기 전에 기다리는 시간 [s](차체 흔들림이 가라앉고 작업대 높이 마커를 다시 잰다)
+  fetch_standoff_m: 0.42
+  fetch_align: true
+  settle_s: 0.8
   # 장소 = 그곳에 붙여 둔 ArUco 마커(4X4_50, 배지와 같은 크기). 따라갈 배지(stack.marker_id)와 겹치지 않게 번호를 고른다.
   # label은 화면과 막내의 말에, aliases는 음성 모델이 알아들을 다른 이름으로 쓴다.
+  # align: true면 마커 정면(법선 위)으로 먼저 옮겨 간 뒤 곧게 다가가 선다. 가까이(0.58 m 안쪽) 서는 장소는 켜 둔다:
+  # 비스듬히 다가가면 책상 모서리가 차체 앞 통로에 걸려 "앞이 막혔어요"로 끝난다(2026-11-16 시뮬레이션에서 확인).
   places:
-    desk: {label: 책상, marker_id: 5, standoff_m: 0.42, aliases: [테이블, 작업대]}
+    desk: {label: 책상, marker_id: 5, standoff_m: 0.42, align: true, aliases: [테이블, 작업대]}
     door: {label: 현관, marker_id: 6, aliases: [문, 입구]}
 
 battery:

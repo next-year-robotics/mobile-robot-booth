@@ -74,6 +74,9 @@ export class LiveVoice {
   private chain: Promise<void> = Promise.resolve();
   private skipReply = false;
   private mute = false;        // 무음 도구 응답 뒤에 모델이 내는 소리는 버린다(녹음 대사가 대신 말한다)
+  /** 사람이 말을 걸 때마다 하나씩 는다. 같은 말에서 나온 도구 호출을 한 묶음으로 잇는 데 쓴다(브리지 tasks.py) */
+  turn = 0;
+  private turnDone = true;
 
   constructor(private o: LiveOptions) {
     this.mic = o.mic ?? new Mic();
@@ -120,6 +123,7 @@ export class LiveVoice {
 
   private beginTalk() {
     this.talking = true;
+    this.turn++; this.turnDone = false;
     this.skipReply = false;
     this.mute = false;
     // 말을 듣기 직전에 지금 상황(작업대 위 물건 등)을 조용히 알려 둔다. 바뀌었을 때만 보낸다.
@@ -222,6 +226,8 @@ export class LiveVoice {
   }
 
   private onContent(c: Record<string, any>) {
+    // 열린 마이크에서는 누르는 순간이 없다. 모델의 대답이 끝난 뒤 처음 들린 말부터 새 말로 센다
+    if (c.inputTranscription?.text && this.handsFree && this.turnDone) { this.turn++; this.turnDone = false; }
     if (c.inputTranscription?.text) { this.heard += c.inputTranscription.text; this.o.caption('user', this.heard.trim()); }
     if (c.interrupted) { player.flush(); this.cutSpeech(); this.said = ''; }
     for (const part of c.modelTurn?.parts ?? []) {
@@ -235,6 +241,7 @@ export class LiveVoice {
       if (this.speaker) this.feed(c.outputTranscription.text);
     }
     if (c.turnComplete) {
+      this.turnDone = true;
       this.skipReply = false;
       if (this.speaker && this.turnOpen) this.feed('', true);
       this.turnOpen = false;

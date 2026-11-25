@@ -59,6 +59,8 @@ ROOM = (-2.0, 5.6, -3.2, 3.2)                          # x0, x1, y0, y1
 BOXES = [(3.6, 4.3, 1.0, 2.2),                          # 책상
          (3.25, 3.45, -0.9, -0.3),                      # 고정 마커 10이 붙은 기둥
          (-1.6, -0.9, -2.9, -2.2)]                      # 상자 더미
+# --nav2 시뮬레이션에서 우회 경로(A*)가 뚜렷하게 드러나도록 거실–현관 사이 파티션을 추가한다.
+NAV2_EXTRA_BOXES = [(0.55, 2.35, -1.45, -1.05)]         # 거실–현관 사이 파티션
 # 장소 마커를 붙일 자리: (위치, 바깥 법선). nav.places 순서대로 쓴다.
 PLACE_SPOTS = [((3.6, 1.6, 0.41), (-1.0, 0.0)),         # 책상 앞면
                ((0.6, -3.2, 0.41), (0.0, 1.0)),         # 남쪽 벽
@@ -67,11 +69,11 @@ LIDAR_RAYS = 720
 LIDAR_MAX = 12.0
 
 
-def scene_segments() -> np.ndarray:
+def scene_segments(extra_boxes: list[tuple[float, float, float, float]] = ()) -> np.ndarray:
     """(N, 4) 선분 x1 y1 x2 y2."""
     x0, x1, y0, y1 = ROOM
     segs = [(x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)]
-    for bx0, bx1, by0, by1 in BOXES:
+    for bx0, bx1, by0, by1 in (*BOXES, *extra_boxes):
         segs += [(bx0, by0, bx1, by0), (bx1, by0, bx1, by1), (bx1, by1, bx0, by1), (bx0, by1, bx0, by0)]
     return np.array(segs)
 
@@ -137,7 +139,9 @@ class FakeRobot(Node):
         lidar = cfg.get('lidar', {})
         self.lidar_xy = np.array(lidar.get('xyz_m', [0.018, -0.004, 0.25])[:2], dtype=float)
         self.lidar_yaw = math.radians(lidar.get('rpy_deg', [0, 0, 177.5])[2])
-        self.segs = scene_segments()
+        self.nav2_mode = '--nav2' in sys.argv
+        self.publish_tf = self.nav2_mode or ('--tf' in sys.argv)
+        self.segs = scene_segments(NAV2_EXTRA_BOXES if self.nav2_mode else ())
 
         self.pub_js = self.create_publisher(JointState, '/joint_states', BE)
         self.pub_status = self.create_publisher(BaseStatus, '/base/status', BE)
@@ -153,11 +157,19 @@ class FakeRobot(Node):
         self.pub_app = self.create_publisher(RobotAppStatus, '/robot/app_status', LATCHED)
         self.pub_scan = self.create_publisher(LaserScan, '/scan', BE)
         self.pub_filtered = self.create_publisher(Odometry, '/odometry/filtered', REL)
+        self.pub_tf = None
+        if self.publish_tf:
+            from geometry_msgs.msg import TransformStamped
+            from tf2_msgs.msg import TFMessage
+            self._TransformStamped, self._TFMessage = TransformStamped, TFMessage
+            self.pub_tf = self.create_publisher(TFMessage, '/tf', REL)
         self.create_subscription(TripCommand, '/phone/trip_command', self.on_trip, REL)
         self.create_subscription(TwistStamped, '/cmd_vel_align', self.on_nav_cmd, REL)
+        self.create_subscription(TwistStamped, '/cmd_vel_nav', self.on_nav2_cmd, REL)
         self.following = '--idle' not in sys.argv
         self.trip_id = 'demo-trip' if self.following else ''
         self.nav_cmd = (-1e9, 0.0, 0.0)
+        self.nav2_cmd = (-1e9, 0.0, 0.0)
 
         # 참값 상태
         self.t0 = time.time()
@@ -247,10 +259,12 @@ class FakeRobot(Node):
         seen = {mid: p for mid, p, _ in self.visible_markers(t)}
 
         # 추종 제어(follow.yaml 게인·한계)를 20 Hz로
-        nav_live = time.monotonic() - self.nav_cmd[0] < MUX_TIMEOUT
-        if nav_live:
-            # errand_nav가 몬다(twist_mux align 자리). 그대로 /cmd_vel로 나간다
-            self.cmd = self.nav_cmd[1:]
+        now_mono = time.monotonic()
+        align_live = now_mono - self.nav_cmd[0] < MUX_TIMEOUT
+        nav2_live = now_mono - self.nav2_cmd[0] < MUX_TIMEOUT
+        if align_live or nav2_live:
+            # twist_mux 우선순위와 동일: align(60) > nav(55) > follow(50)
+            self.cmd = self.nav_cmd[1:] if align_live else self.nav2_cmd[1:]
             if self.k % 5 == 0:
                 self.publish_cmd_out(now)
                 if self.following:
@@ -299,7 +313,7 @@ class FakeRobot(Node):
         self.publish_imu(now)
         if self.k % 2 == 0:
             js = JointState()
-            js.header.stamp = stamp_of(now)
+            js.header.stamp = self.get_clock().now().to_msg() if self.publish_tf else stamp_of(now)
             js.name = ['left_wheel_joint', 'right_wheel_joint']
             js.position = [self.wl, self.wr]
             js.velocity = [vl + random.gauss(0, 0.03), vr + random.gauss(0, 0.03)]
@@ -318,6 +332,9 @@ class FakeRobot(Node):
 
     def on_nav_cmd(self, m: TwistStamped) -> None:
         self.nav_cmd = (time.monotonic(), m.twist.linear.x, m.twist.angular.z)
+
+    def on_nav2_cmd(self, m: TwistStamped) -> None:
+        self.nav2_cmd = (time.monotonic(), m.twist.linear.x, m.twist.angular.z)
 
     def on_trip(self, m: TripCommand) -> None:
         self.following = m.command == TripCommand.COMMAND_START
@@ -343,7 +360,7 @@ class FakeRobot(Node):
         r = r + np.random.normal(0, 0.008, LIDAR_RAYS)
         r[(r > LIDAR_MAX) | (np.random.random(LIDAR_RAYS) < 0.01)] = math.inf
         m = LaserScan()
-        m.header.stamp = stamp_of(now)
+        m.header.stamp = self.get_clock().now().to_msg() if self.publish_tf else stamp_of(now)
         m.header.frame_id = 'laser_link'
         m.angle_min, m.angle_max, m.angle_increment = -math.pi, math.pi - inc, inc
         m.scan_time, m.time_increment = 0.1, 0.1 / LIDAR_RAYS
@@ -366,8 +383,9 @@ class FakeRobot(Node):
         self.pub_imu.publish(m)
 
     def publish_odom(self, now: float, w_odom: float) -> None:
+        stamp = self.get_clock().now().to_msg() if self.publish_tf else stamp_of(now)
         m = Odometry()
-        m.header.stamp = stamp_of(now)
+        m.header.stamp = stamp
         m.header.frame_id = 'odom'
         m.child_frame_id = 'base_footprint'
         m.pose.pose.position.x, m.pose.pose.position.y = self.ox, self.oy
@@ -384,6 +402,16 @@ class FakeRobot(Node):
         f.pose.pose.orientation.w = math.cos(self.th / 2)
         f.twist.twist.linear.x, f.twist.twist.angular.z = self.v, self.w
         self.pub_filtered.publish(f)
+        if self.pub_tf is not None:
+            tf = self._TransformStamped()
+            tf.header.stamp = stamp
+            tf.header.frame_id = 'odom'
+            tf.child_frame_id = 'base_footprint'
+            tf.transform.translation.x = self.x
+            tf.transform.translation.y = self.y
+            tf.transform.rotation.z = math.sin(self.th / 2)
+            tf.transform.rotation.w = math.cos(self.th / 2)
+            self.pub_tf.publish(self._TFMessage(transforms=[tf]))
 
     def publish_status(self, now: float, vl: float, vr: float) -> None:
         m = BaseStatus()

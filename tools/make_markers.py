@@ -31,7 +31,8 @@ PLACES = {int(p['marker_id']): p['label'] for p in (CFG.get('nav', {}).get('plac
 FLAT = [(BADGE, '따라가기 배지 ("따라와")'), (BADGE, '따라가기 배지 · 예비'),
         *[(i, f'장소: {label} ("{label}으로 가")') for i, label in PLACES.items()],
         (3, '번호 따라가기 ("3번 마커 따라와")'), (4, '번호 따라가기 · 예비'),
-        (7, '가서 정렬 ("7번 마커 앞으로 가")'), (8, '예비 장소 A'), (9, '예비 장소 B'), (10, '예비 장소 C')]
+        (7, '가서 정렬 ("7번 마커 앞으로 가")'), (8, '예비 장소 A'), (9, '예비 장소 B'),
+        (10, '작업대 높이 (작업대 위에 눕혀 둔다. 팔 카메라가 잰다)')]      # config/arm.yaml workspace.table_marker
 # 반으로 접어 세우는 것. 양면에 같은 마커가 온다
 TENT = [(i, label) for i, label in PLACES.items()] + [(7, '가서 정렬')]
 

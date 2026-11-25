@@ -22,8 +22,10 @@ FIND = """이 사진은 로봇 위에서 작업대를 내려다본 것이다. �
 찾을 물건: "{name}"
 사진 전체에서 이 말에 맞는 물건을 찾는다. 작업대 밖이나 사람의 손·몸 위에 있어도 보이면 found=true다.
 point는 물체 윗면의 집기 중심이고 box_2d는 물체 자체의 경계다. 받침의 종류와 관계없이 같은 기준으로 찍는다.
+테이프 롤이 눕혀져 있고 고정 집게 손가락이 들어갈 빈 구멍이 위에서 뚜렷이 보이면 tape_hole=true로 하고 point를 그 구멍 정중앙에 찍는다. 그 밖에는 false다.
+same_board는 물건과 흑백 높이 마커가 같은 단단한 판 위에 나란히 놓였을 때만 true다. 천·쿠션·손 위이거나 모르면 false다.
 grasp_clear는 집게가 그 중심으로 내려가 닫힐 위치에 손가락이나 몸이 겹치지 않는지 나타낸다. 물건의 다른 쪽을 손으로 잡고 있는 것만으로 false가 되지는 않는다. 겹치거나 판단할 수 없으면 false다.
-{{"found": true/false, "grasp_clear": true/false, "label": "물건 이름(한국어, 짧게)", "point": [y, x], "box_2d": [ymin, xmin, ymax, xmax], "height_cm": 숫자, "reason": "한 문장"}}
+{{"found": true/false, "grasp_clear": true/false, "tape_hole": true/false, "same_board": true/false, "label": "물건 이름(한국어, 짧게)", "point": [y, x], "box_2d": [ymin, xmin, ymax, xmax], "height_cm": 숫자, "reason": "한 문장"}}
 좌표는 0~1000으로 정규화한다.
 height_cm는 받치고 있는 손이나 받침을 제외한 물체 자체의 높이다. 맞는 물건이 없으면 found를 false로 하고 reason에 보이는 물건을 적는다."""
 
@@ -87,6 +89,11 @@ class Argon:
             y, x = (float(v) for v in item['point'])
             out = {'label': str(item.get('label', ''))[:40], 'u': x / 1000 * w, 'v': y / 1000 * h,
                    'height_m': float(np.clip(float(item.get('height_cm') or 3.0), 0.5, 30.0)) / 100}
+            if item.get('support_depth_cm') is not None:
+                try:
+                    out['support_depth_m'] = float(item['support_depth_cm']) / 100
+                except (ValueError, TypeError):
+                    pass
             box = item.get('box_2d')
             if isinstance(box, list) and len(box) == 4:
                 y0, x0, y1, x1 = (float(v) for v in box)
@@ -95,10 +102,10 @@ class Argon:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def find(self, frame: np.ndarray, name: str) -> dict:
-        """{'found': bool, 'label', 'u', 'v', 'box', 'height_m', 'reason'}"""
+    def find(self, frame: np.ndarray, name: str, hint: str = '') -> dict:
+        """{'found': bool, 'label', 'u', 'v', 'box', 'height_m', 'reason'}. hint: 작업대 정보(높이 마커, 카메라까지 거리)"""
         h, w = frame.shape[:2]
-        ans = self._ask(encode(frame), FIND.format(name=name.replace('"', ' ')[:60]))
+        ans = self._ask(encode(frame), FIND.format(name=name.replace('"', ' ')[:60]) + (f'\n{hint}' if hint else ''))
         if isinstance(ans, list):
             ans = ans[0] if ans else {'found': False}
         if not ans.get('found'):
@@ -106,11 +113,12 @@ class Argon:
         item = self._pixels(ans, w, h)
         if item is None:
             return {'found': False, 'reason': '좌표가 없는 응답'}
-        return {'found': True, 'grasp_clear': ans.get('grasp_clear') is True, 'reason': str(ans.get('reason', ''))[:120], **item}
+        return {'found': True, 'same_board': ans.get('same_board') is True, 'tape_hole': ans.get('tape_hole') is True,
+                'grasp_clear': ans.get('grasp_clear') is True, 'reason': str(ans.get('reason', ''))[:120], **item}
 
-    def list(self, frame: np.ndarray) -> list[dict]:
+    def list(self, frame: np.ndarray, hint: str = '') -> list[dict]:
         h, w = frame.shape[:2]
-        ans = self._ask(encode(frame), LIST)
+        ans = self._ask(encode(frame), LIST + (f'\n{hint}' if hint else ''))
         if not isinstance(ans, list):
             return []
         return [p for i in ans if isinstance(i, dict) and (p := self._pixels(i, w, h))]
@@ -123,10 +131,10 @@ def encode(frame: np.ndarray, quality: int = 90) -> bytes:
     return buf.tobytes()
 
 
-def grasp_axis(frame: np.ndarray, box: list[float] | None, u: float, v: float) -> tuple[float, float, float] | None:
+def grasp_axis(frame: np.ndarray, box: list[float] | None, u: float, v: float) -> tuple[float, float, float, float] | None:
     """상자 안에서 물건을 배경과 갈라(GrabCut) 좁은 쪽 방향을 구한다.
 
-    반환: (중심 u, 중심 v, 긴 축의 영상 각도[rad]) 또는 None. 집게는 긴 축에 수직으로 다문다.
+    반환: (중심 u, 중심 v, 긴 축의 영상 각도[rad], 짧은 변[px]) 또는 None. 집게는 긴 축에 수직으로 다문다.
     둥글거나 정사각형에 가까우면 각도는 의미가 없어 None을 준다.
     """
     if not box:
@@ -152,7 +160,7 @@ def grasp_axis(frame: np.ndarray, box: list[float] | None, u: float, v: float) -
         return None
     # 모델이 찍은 점에 가장 가까운 덩어리
     def dist(c):
-        return abs(cv2.pointPolygonTest(c, (float(u - rx0), float(v - ry0)), True))
+        return -cv2.pointPolygonTest(c, (float(u - rx0), float(v - ry0)), True)
     c = min((c for c in cs if cv2.contourArea(c) > 30), key=dist, default=None)
     if c is None:
         return None
@@ -161,4 +169,4 @@ def grasp_axis(frame: np.ndarray, box: list[float] | None, u: float, v: float) -
     if short < 2 or long_ / short < 1.25:
         return None
     theta = np.radians(ang if rw >= rh else ang + 90.0)
-    return cx + rx0, cy + ry0, float(theta)
+    return cx + rx0, cy + ry0, float(theta), short

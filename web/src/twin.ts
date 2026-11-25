@@ -184,6 +184,12 @@ export class Twin {
   private home = new THREE.Group();
   private goalLine!: THREE.Line;
   private goalLabel = label('', 'accent');
+  private planGroup = new THREE.Group();
+  private planGlow!: THREE.Mesh;
+  private planCore!: THREE.Mesh;
+  private planDots!: THREE.Points;
+  private planEnd = new THREE.Group();
+  private planLabel = label('', 'plan');
 
   constructor(private onReset: () => void) {
     const r = this.renderer;
@@ -361,15 +367,114 @@ export class Twin {
       new THREE.LineDashedMaterial({ color: C.accent, dashSize: 0.07, gapSize: 0.05, transparent: true, opacity: 0.8 }));
     this.goalLine.frustumCulled = false;
     for (const o of [this.goal, this.home, this.goalLine]) { o.visible = false; this.robot.add(o); }
+
+    // Nav2 전역 경로(/plan): WebGL 1 px 제한을 피하려고 3D 띠 메쉬(발광 외곽 + 중심선 + 웨이포인트 점)로 그린다.
+    const mkRibbon = (color: string, opacity: number, order: number) => {
+      const geo = new THREE.BufferGeometry();
+      const attr = new THREE.BufferAttribute(new Float32Array(200 * 6 * 3), 3);
+      attr.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute('position', attr);
+      geo.setDrawRange(0, 0);
+      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false,
+      }));
+      mesh.frustumCulled = false;
+      mesh.renderOrder = order;
+      return mesh;
+    };
+    this.planGlow = mkRibbon(C.accent, 0.30, 3);
+    this.planCore = mkRibbon('#C6FF87', 0.96, 4);
+    const dotGeo = new THREE.BufferGeometry();
+    const dotAttr = new THREE.BufferAttribute(new Float32Array(200 * 3), 3);
+    dotAttr.setUsage(THREE.DynamicDrawUsage);
+    dotGeo.setAttribute('position', dotAttr);
+    dotGeo.setDrawRange(0, 0);
+    this.planDots = new THREE.Points(dotGeo, new THREE.PointsMaterial({
+      color: C.title, size: 0.065, sizeAttenuation: true, transparent: true, opacity: 0.92, depthWrite: false,
+    }));
+    this.planDots.frustumCulled = false;
+    this.planDots.renderOrder = 5;
+    this.planEnd.add(ring(0.18, C.accent), ring(0.06, '#C6FF87'));
+    this.planLabel.position.set(0, 0, 0.34);
+    this.planEnd.add(this.planLabel);
+    this.planGroup.add(this.planGlow, this.planCore, this.planDots, this.planEnd);
+    this.planGroup.visible = false;
+    (this.planLabel.element as HTMLElement).style.display = 'none';
+    this.scene.add(this.planGroup);
+  }
+
+  private fillRibbon(mesh: THREE.Mesh, pts: [number, number][], halfWidth: number, z: number) {
+    const n = Math.min(pts.length, 200);
+    const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const normals: [number, number][] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+      let dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy);
+      if (len > 1e-6) { dx /= len; dy /= len; } else { dx = 1; dy = 0; }
+      normals[i] = [-dy * halfWidth, dx * halfWidth];
+    }
+    let v = 0;
+    for (let i = 0; i < n - 1; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+      const [nx0, ny0] = normals[i], [nx1, ny1] = normals[i + 1];
+      pos.setXYZ(v++, x0 + nx0, y0 + ny0, z);
+      pos.setXYZ(v++, x0 - nx0, y0 - ny0, z);
+      pos.setXYZ(v++, x1 + nx1, y1 + ny1, z);
+      pos.setXYZ(v++, x0 - nx0, y0 - ny0, z);
+      pos.setXYZ(v++, x1 - nx1, y1 - ny1, z);
+      pos.setXYZ(v++, x1 + nx1, y1 + ny1, z);
+    }
+    pos.needsUpdate = true;
+    mesh.geometry.setDrawRange(0, v);
   }
 
   private showNav(s: State) {
     const nav = s.nav, moving = !!nav && !['idle', 'arrived', 'failed', 'cancelled'].includes(nav.state);
     const g = moving ? nav!.goal : null;
-    this.goal.visible = this.goalLine.visible = !!g;
+    const plan = s.plan && s.plan.pts.length >= 2 ? s.plan : null;
+    const hasPlan = !!plan;
+
+    this.planGroup.visible = hasPlan;
+    (this.planLabel.element as HTMLElement).style.display = hasPlan ? '' : 'none';
+    if (plan) {
+      // 라이다 흔적과 같은 보정: /plan은 EKF 좌표이므로 /odom 로봇 자리와 정확히 겹치게 옮긴다.
+      if (s.ekf && s.odom) {
+        const dyaw = s.odom.yaw - s.ekf[2], c = Math.cos(dyaw), sn = Math.sin(dyaw);
+        this.planGroup.rotation.z = dyaw;
+        this.planGroup.position.set(
+          s.odom.x - (c * s.ekf[0] - sn * s.ekf[1]),
+          s.odom.y - (sn * s.ekf[0] + c * s.ekf[1]),
+          0,
+        );
+      } else {
+        this.planGroup.rotation.z = 0;
+        this.planGroup.position.set(0, 0, 0);
+      }
+      this.fillRibbon(this.planGlow, plan.pts, 0.085, 0.015);
+      this.fillRibbon(this.planCore, plan.pts, 0.026, 0.018);
+      const dotPos = this.planDots.geometry.getAttribute('position') as THREE.BufferAttribute;
+      let dn = 0, acc = 0;
+      for (let i = 1; i < plan.pts.length && dn < 200; i++) {
+        acc += Math.hypot(plan.pts[i][0] - plan.pts[i - 1][0], plan.pts[i][1] - plan.pts[i - 1][1]);
+        if (acc >= 0.35) {
+          dotPos.setXYZ(dn++, plan.pts[i][0], plan.pts[i][1], 0.022);
+          acc = 0;
+        }
+      }
+      dotPos.needsUpdate = true;
+      this.planDots.geometry.setDrawRange(0, dn);
+      const end = plan.pts[plan.pts.length - 1];
+      this.planEnd.position.set(end[0], end[1], 0.019);
+      const name = s.tasks?.task?.kind === 'home' ? '시작 위치' : s.tasks?.task?.label ?? '목적지';
+      (this.planLabel.element as HTMLElement).textContent =
+        `Nav2 A* · ${name} ${fmt(plan.len_m, 2)} m${nav?.blocked ? ' · 앞이 막힘' : ''}`;
+    }
+
+    this.goal.visible = this.goalLine.visible = !!g && !hasPlan;
     this.lidar.avoid = g;
-    (this.goalLabel.element as HTMLElement).style.display = g ? '' : 'none';
-    if (g) {
+    (this.goalLabel.element as HTMLElement).style.display = g && !hasPlan ? '' : 'none';
+    if (g && !hasPlan) {
       this.goal.position.set(g[0], g[1], 0.005);
       const p = this.goalLine.geometry.attributes.position as THREE.BufferAttribute;
       p.setXYZ(0, 0, 0, 0.006); p.setXYZ(1, g[0], g[1], 0.006); p.needsUpdate = true;
@@ -434,9 +539,10 @@ export class Twin {
     const d = s.odom ? Math.hypot(s.odom.x, s.odom.y) : 0;
     this.showNav(s);
     const scan = s.lidar ? `  라이다 ${s.lidar.n}점 ${fmt(s.lidar.hz, 0)} Hz` : '';
+    const planMeta = s.plan && s.plan.pts.length >= 2 ? `  Nav2 경로 ${fmt(s.plan.len_m, 2)} m` : '';
     this.meta.textContent = (s.odom
       ? `x ${fmt(s.odom.x, 2, true)}  y ${fmt(s.odom.y, 2, true)}  yaw ${fmt((s.odom.yaw * 180) / Math.PI, 0, true)}°  원점에서 ${fmt(d, 2)} m`
-      : '오도메트리 없음') + scan;
+      : '오도메트리 없음') + scan + planMeta;
   }
 
   /** 디지털 트윈만 화면 가득 띄운다(F, 다시 누르거나 Esc로 돌아온다). 크기 변화는 ResizeObserver가 따라간다. */
@@ -490,6 +596,18 @@ export class Twin {
       this.camera.position.add(delta);
       this.controls.autoRotate = performance.now() > this.idleUntil;
       this.controls.update(dt);
+    } else if (this.view === 'top' && this.planGroup.visible) {
+      // Nav2 경로가 보이면 로봇과 목적지 전체 곡선이 한 화면에 들어오도록 부감 높이와 중심을 맞춘다.
+      const endW = new THREE.Vector3();
+      this.planEnd.getWorldPosition(endW);
+      const mid = focus.clone().lerp(endW, 0.56);
+      const dist = focus.distanceTo(endW);
+      const camZ = Math.min(9.6, Math.max(6.2, dist * 1.62 + 2.6));
+      const want = new THREE.Vector3(mid.x - 1.3, mid.y - 1.6, camZ);
+      this.camera.position.lerp(want, 1 - Math.exp(-dt / 0.45));
+      const look = new THREE.Vector3(mid.x, mid.y, 0.15);
+      this.controls.target.lerp(look, 1 - Math.exp(-dt / 0.35));
+      this.camera.lookAt(this.controls.target);
     } else {
       const want = this.view === 'follow'
         ? focus.clone().add(fwd.clone().multiplyScalar(-1.9)).add(new THREE.Vector3(0, 0, 1.15))

@@ -53,16 +53,23 @@ class BoothNode(Node):
         self.on_scan_packet = None        # (머리 dict, 본문 bytes)를 받을 함수. 서버가 꽂는다
 
         from geometry_msgs.msg import TwistStamped
-        from nav_msgs.msg import Odometry
+        from nav_msgs.msg import Odometry, Path as NavPath
         from sensor_msgs.msg import CameraInfo, CompressedImage, Imu, JointState, Joy, LaserScan
         from std_msgs.msg import String
         import json
         self._json, self._String = json, String
+        self._map_to_odom = (0.0, 0.0, 0.0)
         if cfg.get('lidar', {}).get('enabled', True):
             self.create_subscription(LaserScan, topics.get('scan', '/scan'), self.on_scan, SENSOR)
         # 이동 노드(robot/errand_nav.py). 명령은 놓치면 안 되니 RELIABLE, 상태는 5 Hz로 다시 오니 BEST_EFFORT로 받는다
         self.nav_pub = self.create_publisher(String, topics.get('nav_command', '/nav/command'), RELIABLE)
         self.create_subscription(String, topics.get('nav_status', '/nav/status'), self.on_nav_status, SENSOR)
+        self.create_subscription(NavPath, topics.get('nav_plan', '/plan'), self.on_plan, SENSOR)
+        try:
+            from tf2_msgs.msg import TFMessage
+            self.create_subscription(TFMessage, '/tf', self.on_tf, SENSOR)
+        except ImportError:
+            pass
 
         self.create_subscription(JointState, topics['joint_states'], self.on_joint_states, SENSOR)
         self.create_subscription(Imu, topics['imu'], self.on_imu, SENSOR)
@@ -131,6 +138,31 @@ class BoothNode(Node):
             return
         if isinstance(status, dict):
             self.state.on_nav(time.monotonic(), status)
+
+    def on_tf(self, m) -> None:
+        for tf in m.transforms:
+            p = tf.header.frame_id.lstrip('/')
+            c = tf.child_frame_id.lstrip('/')
+            if p == 'map' and c == 'odom':
+                t = tf.transform.translation
+                self._map_to_odom = (float(t.x), float(t.y), _yaw(tf.transform.rotation))
+
+    def on_plan(self, m) -> None:
+        frame = (m.header.frame_id or '').lstrip('/')
+        pts = []
+        if frame == 'map':
+            tx, ty, tyaw = self._map_to_odom
+            c, s = math.cos(tyaw), math.sin(tyaw)
+            for ps in m.poses:
+                dx = float(ps.pose.position.x) - tx
+                dy = float(ps.pose.position.y) - ty
+                pts.append((c * dx + s * dy, -s * dx + c * dy))
+            out_frame = 'odom'
+        else:
+            for ps in m.poses:
+                pts.append((float(ps.pose.position.x), float(ps.pose.position.y)))
+            out_frame = frame or 'odom'
+        self.state.on_plan(time.monotonic(), pts, out_frame)
 
     def on_scan(self, m) -> None:
         shaped = self.shaper.shape(m.ranges, m.angle_min, m.angle_increment, m.range_min, m.range_max)
